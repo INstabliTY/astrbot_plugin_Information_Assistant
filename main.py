@@ -11,7 +11,7 @@ from astrbot.core.message.components import Plain
 from astrbot.core.message.message_event_result import MessageChain
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-@register("astrbot_plugin_mkt_daily_news", "全能商业助理", "聚合天气、提醒、纯文本新闻与汇率", "3.0.0")
+@register("astrbot_plugin_Information_Assistant", "资讯助理", "聚合天气、提醒、纯文本新闻与汇率", "3.0.0")
 class MorningNewsPlugin(Star):
     def __init__(self, context: Context, config: dict = None):
         super().__init__(context)
@@ -117,7 +117,7 @@ class MorningNewsPlugin(Star):
 
     # ================= 3. 纯文本新闻与汇率模块 =================
     async def fetch_60s_news_text(self, session):
-        """直接抓取接口里的文本列表，不下载图片"""
+        """直接抓取接口里的文本列表，彻底解决空行被吞的问题"""
         urls = ["https://60s.viki.moe/v2/60s", "https://60s-api.114128.xyz/v2/60s"]
         for url in urls:
             try:
@@ -125,15 +125,15 @@ class MorningNewsPlugin(Star):
                     if resp.status == 200:
                         data = await resp.json()
                         news_items = data.get("data", {}).get("news", [])
-                        tip = data.get("data", {}).get("tip", "")
                         
                         if not news_items: continue
                             
                         text = "📰 【每日60s纯文本速报】\n\n"
                         for i, item in enumerate(news_items, 1):
-                            text += f"{i}. {item}\n"
-                        text += f"\n💡 微语：{tip}"
-                        return text
+                            # 核心魔法：\n \n （中间加了一个物理空格，Telegram 就无法折叠它了）
+                            text += f"{i}. {item}\n \n"
+                        
+                        return text.strip()
             except Exception:
                 continue
         return "📰 【新闻速报】获取失败，接口波动。"
@@ -165,8 +165,11 @@ class MorningNewsPlugin(Star):
             async with session.get(url, headers={"Authorization": f"Bearer {self.deepseek_key}"}) as resp:
                 if resp.status == 200:
                     data = await resp.json()
-                    if infos := data.get("balance_infos", []):
-                        return f"- DeepSeek: {infos[0].get('total_balance')} {infos[0].get('currency')}"
+                    infos = data.get("balance_infos", [])
+                    if infos:
+                        # 遍历找出所有币种的余额，用斜杠拼接在一起
+                        balances = [f"{info.get('total_balance')} {info.get('currency')}" for info in infos]
+                        return f"- DeepSeek: {' / '.join(balances)}"
         except Exception: pass
         return "- DeepSeek: 查询异常"
 
