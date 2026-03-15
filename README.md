@@ -111,7 +111,7 @@ git clone [https://github.com/INstabliTY/astrbot_plugin_mkt_daily_news.git](http
 ---
 
 ## 📅 更新日志
-###v1.0.0 (当前版本)
+### v1.0.0 (当前版本)
 
 *🎉 首次正式发布！
 
