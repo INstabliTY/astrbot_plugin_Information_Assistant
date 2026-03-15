@@ -43,7 +43,7 @@
 ### 2. 指令安装
 向你的机器人发送以下指令直接拉取安装：
 ```text
-/plugin install astrbot_plugin_mkt_daily_news
+/plugin install astrbot_plugin_Information_Assistant
 ```
 
 ### 3. GitHub 源码下载安装
