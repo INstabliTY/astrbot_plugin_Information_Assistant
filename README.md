@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="https://via.placeholder.com/150?text=Business+Pro" alt="Plugin Logo" width="150" height="150" />
+<img src="./logo.png" alt="Plugin Logo" width="150" height="150" />
 
 # AstrBot 全能商业助理插件 (Market Daily News)
 
@@ -44,11 +44,14 @@
 向你的机器人发送以下指令直接拉取安装：
 ```text
 /plugin install astrbot_plugin_mkt_daily_news
+```
 
 ### 3. GitHub 源码下载安装
 进入 AstrBot 的插件目录，使用 Git 克隆本仓库：
+```text
 cd data/plugins/
 git clone [https://github.com/INstabliTY/astrbot_plugin_mkt_daily_news.git](https://github.com/INstabliTY/astrbot_plugin_mkt_daily_news.git)
+```
 
 (注意：请确保克隆后的文件夹名称严格为 astrbot_plugin_mkt_daily_news)
 
@@ -56,14 +59,14 @@ git clone [https://github.com/INstabliTY/astrbot_plugin_mkt_daily_news.git](http
 
 ---
 
-💻 核心指令
+## 💻 核心指令
 指令,说明,示例
 /今日情报,立即手动触发一次完整的商业情报推送,/今日情报
 /添加提醒,向本地日历中添加一条待办事项,/添加提醒 2026-03-16 记得微观经济学小测
 
 ---
 
-⚙️ 配置说明
+## ⚙️ 配置说明
 在 AstrBot WebUI 的“插件配置”页面，你可以可视化修改以下参数：
 
 每日定时推送时间: 24小时制，例如 08:00。
@@ -78,7 +81,7 @@ git clone [https://github.com/INstabliTY/astrbot_plugin_mkt_daily_news.git](http
 
 ---
 
-📊 数据来源 (Data Sources)
+## 📊 数据来源 (Data Sources)
 本插件的数据来源于互联网公开接口及官方 API，具体如下：
 模块,数据内容,数据来源,来源网址,获取方式
 天气预报,经纬度及气象数据,Open-Meteo,https://open-meteo.com/,API 调用 (免Key)
@@ -87,15 +90,15 @@ git clone [https://github.com/INstabliTY/astrbot_plugin_mkt_daily_news.git](http
 AI 额度,DeepSeek 账户余额,DeepSeek 官方,https://platform.deepseek.com/,官方 API
 AI 额度,Kimi 账户余额,Moonshot 官方,https://platform.moonshot.cn/,官方 API
 
-📝 注意：
+   📝 注意：
 
-汇率 数据来源 ExchangeRate-API，请自行注册并获取 API 密钥填入配置。
-
-AI 额度 数据来源使用官方 API，请在配置页面填写您自己的 API 密钥。如果未填写，看板将自动跳过报错并显示“未配置”。
+   |汇率 数据来源 ExchangeRate-API，请自行注册并获取 API 密钥填入配置。
+   |
+   |AI 额度 数据来源使用官方 API，请在配置页面填写您自己的 API 密钥。如果未填写，看板将自动跳过报错并显示“未配置”。
 
 ---
 
-⚠️ 免责声明
+## ⚠️ 免责声明
 我还是个初学者：这是我初次尝试编写并开源 AstrBot 插件，代码如有不优雅之处，欢迎各位大佬提 PR 指正！
 
 测试环境声明：目前本插件仅在 Telegram 平台上测试成功并完美排版。QQ、飞书、微信等其他平台的长文本换行解析机制可能存在差异，若出现排版问题，请见谅或提交 Issue 反馈。
@@ -104,7 +107,7 @@ AI 额度 数据来源使用官方 API，请在配置页面填写您自己的 AP
 
 ---
 
-📅 更新日志
+## 📅 更新日志
 v1.0.0 (当前版本)
 🎉 首次正式发布！
 
