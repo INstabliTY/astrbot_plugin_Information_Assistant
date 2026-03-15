@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="./logo.png" alt="Plugin Logo" width="150" height="150" />
+<img src="./logo.png?v=2" alt="Plugin Logo" width="150" height="150" />
 
 # AstrBot 资讯助理 (Information Assistant)
 
