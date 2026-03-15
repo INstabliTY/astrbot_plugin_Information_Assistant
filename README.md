@@ -2,7 +2,7 @@
 
 <img src="./logo.png" alt="Plugin Logo" width="150" height="150" />
 
-# AstrBot 资讯助理插件 (Information Assistant)
+# AstrBot 资讯助理 (Information Assistant)
 
 **让你的 AstrBot 化身最强个人情报中枢：天气、日程、新闻速报、资产监控一网打尽！**
 
