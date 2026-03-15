@@ -85,7 +85,7 @@ git clone [https://github.com/INstabliTY/astrbot_plugin_mkt_daily_news.git](http
 本插件的数据来源于互联网公开接口及官方 API，具体如下：
 
 | 模块 | 数据内容 | 数据来源 | 来源网址 | 获取方式 |
-| :--- | :---: | ---: |
+| :--- | :--- | :--- | :--- | :--- |
 | 天气预报 | 经纬度及气象数据 | Open-Meteo | https://open-meteo.com/ | API 调用 (免Key)
 | 新闻速读 | 每日60s文本新闻 | 社区公益 API | https://60s.viki.moe/ | API 调用 (免Key)
 | 实时汇率 | 法币汇率换算 | ExchangeRate-API | https://www.exchangerate-api.com/ | API 调用
