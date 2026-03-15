@@ -1,4 +1,4 @@
-# astrbot-plugin-helloworld
+# astrbot-plugin-每日新闻
 
 AstrBot 插件模板 / A template plugin for AstrBot plugin feature
 
