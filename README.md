@@ -53,7 +53,7 @@ cd data/plugins/
 git clone [https://github.com/INstabliTY/astrbot_plugin_mkt_daily_news.git](https://github.com/INstabliTY/astrbot_plugin_mkt_daily_news.git)
 ```
    📝 注意：
-> (注意：请确保克隆后的文件夹名称严格为 astrbot_plugin_mkt_daily_news)
+> 请确保克隆后的文件夹名称严格为 astrbot_plugin_mkt_daily_news
 > 
 > ⚠️ 安装完成后，请务必重启 AstrBot 主程序使插件生效！
 
