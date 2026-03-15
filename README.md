@@ -53,9 +53,9 @@ cd data/plugins/
 git clone [https://github.com/INstabliTY/astrbot_plugin_mkt_daily_news.git](https://github.com/INstabliTY/astrbot_plugin_mkt_daily_news.git)
 ```
 
-(注意：请确保克隆后的文件夹名称严格为 astrbot_plugin_mkt_daily_news)
-
-⚠️ 安装完成后，请务必重启 AstrBot 主程序使插件生效！
+&emsp;&emsp;> (注意：请确保克隆后的文件夹名称严格为 astrbot_plugin_mkt_daily_news)
+&emsp;&emsp;> 
+&emsp;&emsp;> ⚠️ 安装完成后，请务必重启 AstrBot 主程序使插件生效！
 
 ---
 
@@ -83,18 +83,18 @@ git clone [https://github.com/INstabliTY/astrbot_plugin_mkt_daily_news.git](http
 
 ## 📊 数据来源 (Data Sources)
 本插件的数据来源于互联网公开接口及官方 API，具体如下：
-模块,数据内容,数据来源,来源网址,获取方式
-天气预报,经纬度及气象数据,Open-Meteo,https://open-meteo.com/,API 调用 (免Key)
-新闻速读,每日60s文本新闻,社区公益 API,https://60s.viki.moe/,API 调用 (免Key)
-实时汇率,法币汇率换算,ExchangeRate-API,https://www.exchangerate-api.com/,API 调用
-AI 额度,DeepSeek 账户余额,DeepSeek 官方,https://platform.deepseek.com/,官方 API
-AI 额度,Kimi 账户余额,Moonshot 官方,https://platform.moonshot.cn/,官方 API
+| 模块 | 数据内容 | 数据来源 | 来源网址 | 获取方式 |
+| 天气预报 | 经纬度及气象数据 | Open-Meteo | https://open-meteo.com/ | API 调用 (免Key)
+| 新闻速读 | 每日60s文本新闻 | 社区公益 API | https://60s.viki.moe/ | API 调用 (免Key)
+| 实时汇率 | 法币汇率换算 | ExchangeRate-API | https://www.exchangerate-api.com/ | API 调用
+| AI 额度 | DeepSeek 账户余额 | DeepSeek 官方 | https://platform.deepseek.com/ | 官方 API
+| AI 额度 | Kimi 账户余额 | Moonshot 官方 | https://platform.moonshot.cn/ | 官方 API
 
    📝 注意：
 
-   |汇率 数据来源 ExchangeRate-API，请自行注册并获取 API 密钥填入配置。
-   |
-   |AI 额度 数据来源使用官方 API，请在配置页面填写您自己的 API 密钥。如果未填写，看板将自动跳过报错并显示“未配置”。
+&emsp;&emsp;> 汇率 数据来源 ExchangeRate-API，请自行注册并获取 API 密钥填入配置。
+&emsp;&emsp;> 
+&emsp;&emsp;> AI 额度 数据来源使用官方 API，请在配置页面填写您自己的 API 密钥。如果未填写，看板将自动跳过报错并显示“未配置”。
 
 ---
 
@@ -109,14 +109,14 @@ AI 额度,Kimi 账户余额,Moonshot 官方,https://platform.moonshot.cn/,官方
 
 ## 📅 更新日志
 v1.0.0 (当前版本)
-🎉 首次正式发布！
+*🎉 首次正式发布！
 
-✨ 新增 Open-Meteo 天气与防雨穿衣提醒。
+*✨ 新增 Open-Meteo 天气与防雨穿衣提醒。
 
-✨ 新增本地超强 reminders.json 待办事项管理模块。
+*✨ 新增本地超强 reminders.json 待办事项管理模块。
 
-✨ 优化 60s 新闻为纯文本输出。
+*✨ 优化 60s 新闻为纯文本输出。
 
-✨ 修复网络堵塞问题，采用全局 ClientSession 和 asyncio.gather 实现高并发极速请求。
+*✨ 修复网络堵塞问题，采用全局 ClientSession 和 asyncio.gather 实现高并发极速请求。
 
-✨ 修复 DeepSeek 仅显示单币种的问题，现支持 CNY/USD 双币种余额同时展示。
+*✨ 修复 DeepSeek 仅显示单币种的问题，现支持 CNY/USD 双币种余额同时展示。
