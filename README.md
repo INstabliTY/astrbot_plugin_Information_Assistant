@@ -70,20 +70,20 @@ git clone [https://github.com/INstabliTY/astrbot_plugin_mkt_daily_news.git](http
 ## ⚙️ 配置说明
 在 AstrBot WebUI 的“插件配置”页面，你可以可视化修改以下参数：
 
-*每日定时推送时间: 24小时制。
+* 每日定时推送时间: 24小时制。
 > 例如 08:00。
 
-*推送目标群组/用户 ID: 请带上平台前缀。
+* 推送目标群组/用户 ID: 请带上平台前缀。
 > 例如向 Telegram 个人推送请填写：telegram:FriendMessage:你的UID
 > 
 > 向 QQ 群推送请填写 aiocqhttp:GroupMessage:你的群号。
 
-*所在城市: 用于天气预报
+* 所在城市: 用于天气预报
 > 如 北京。
 
-*汇率 API Key: 前往 ExchangeRate-API 免费注册获取。
+* 汇率 API Key: 前往 ExchangeRate-API 免费注册获取。
 
-*大模型 API Key: 选填 DeepSeek 和 Kimi 的 API Key 用于资产监控。
+* 大模型 API Key: 选填 DeepSeek 和 Kimi 的 API Key 用于资产监控。
 
 ---
 
@@ -118,14 +118,14 @@ git clone [https://github.com/INstabliTY/astrbot_plugin_mkt_daily_news.git](http
 ## 📅 更新日志
 ### v1.0.0 (当前版本)
 
-*🎉 首次正式发布！
+* 🎉 首次正式发布！
 
-*✨ 新增 Open-Meteo 天气与防雨穿衣提醒。
+* ✨ 新增 Open-Meteo 天气与防雨穿衣提醒。
 
-*✨ 新增本地超强 reminders.json 待办事项管理模块。
+* ✨ 新增本地超强 reminders.json 待办事项管理模块。
 
-*✨ 优化 60s 新闻为纯文本输出。
+* ✨ 优化 60s 新闻为纯文本输出。
 
-*✨ 修复网络堵塞问题，采用全局 ClientSession 和 asyncio.gather 实现高并发极速请求。
+* ✨ 修复网络堵塞问题，采用全局 ClientSession 和 asyncio.gather 实现高并发极速请求。
 
-*✨ 修复 DeepSeek 仅显示单币种的问题，现支持 CNY/USD 双币种余额同时展示。
+* ✨ 修复 DeepSeek 仅显示单币种的问题，现支持 CNY/USD 双币种余额同时展示。
