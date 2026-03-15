@@ -1,4 +1,4 @@
-name: astrbot_plugin_mkt_Information_Assistant
+name: astrbot_plugin_Information_Assistant
 display_name: 资讯助理
 desc: 让你的 AstrBot 化身个人情报中枢：天气、日程、新闻速报、汇率、资产监控一网打尽！
 help: 发送“今日情报”或设置定时推送
