@@ -1,49 +1,121 @@
 {
-  "push_time": {
-    "description": "每日定时推送时间",
-    "type": "string",
-    "default": "08:00",
-    "hint": "24小时制，如 08:30"
+  "push_settings": {
+    "description": "🚀 全局推送设置",
+    "hint": "控制资讯助理的定时推送与时区",
+    "type": "object",
+    "items": {
+      "enable_push": {
+        "description": "[主开关] 启用每日定时推送",
+        "type": "bool",
+        "default": true,
+        "hint": "关闭后将只做被动响应，不再自动发送早报"
+      },
+      "push_time": {
+        "description": "每日定时推送时间",
+        "type": "string",
+        "default": "08:00",
+        "hint": "24小时制，如 08:30"
+      },
+      "target_groups": {
+        "description": "推送目标群组/用户 ID",
+        "type": "list",
+        "default": [],
+        "hint": "平台/类型/目标ID，例telegram:FriendMessage:你的ID"
+      },
+      "timezone_offset": {
+        "type": "string",
+        "description": "插件运行时区 (UTC 偏移量)",
+        "hint": "中国大陆选 8，澳洲东部选 10 (夏令时 11)",
+        "default": "10"
+      }
+    }
   },
-  "target_groups": {
-    "description": "推送目标群组/用户 ID",
-    "type": "list",
-    "default": [],
-    "hint": "平台/类型/目标ID，例telegram:FriendMessage:你的ID或群号"
+  "weather_settings": {
+    "description": "🌤️ 天气预报模块",
+    "type": "object",
+    "items": {
+      "enable_weather": {
+        "description": "[开关] 启用天气模块",
+        "type": "bool",
+        "default": true
+      },
+      "city": {
+        "description": "所在城市",
+        "type": "string",
+        "default": "北京",
+        "hint": "输入城市中文，如：上海"
+      }
+    }
   },
-  "city": {
-    "description": "所在城市 (用于天气预报)",
-    "type": "string",
-    "default": "北京",
-    "hint": "输入城市中文，如：上海"
+  "reminder_settings": {
+    "description": "📝 待办提醒模块",
+    "type": "object",
+    "items": {
+      "enable_reminders": {
+        "description": "[开关] 启用待办提醒模块",
+        "type": "bool",
+        "default": true
+      }
+    }
   },
-  "exchange_api_key": {
-    "description": "汇率 API Key",
-    "type": "string",
-    "default": "",
-    "hint": "前往 exchangerate-api.com 免费获取"
+  "exchange_settings": {
+    "description": "📊 实时汇率模块",
+    "type": "object",
+    "items": {
+      "enable_exchange": {
+        "description": "[开关] 启用实时汇率模块",
+        "type": "bool",
+        "default": true
+      },
+      "exchange_api_key": {
+        "description": "汇率 API Key",
+        "type": "string",
+        "default": "",
+        "hint": "前往 exchangerate-api.com 获取"
+      },
+      "base_currency": {
+        "description": "基础货币",
+        "type": "string",
+        "default": "CNY"
+      },
+      "target_currencies": {
+        "description": "目标货币代码",
+        "type": "string",
+        "default": "USD,JPY,EUR,GBP,HKD,AUD",
+        "hint": "用英文逗号隔开"
+      }
+    }
   },
-  "base_currency": {
-    "description": "基础货币",
-    "type": "string",
-    "default": "CNY"
+  "balance_settings": {
+    "description": "💰 API 余额监控",
+    "type": "object",
+    "items": {
+      "enable_balance": {
+        "description": "[开关] 启用 API 余额监控",
+        "type": "bool",
+        "default": true
+      },
+      "deepseek_key": {
+        "description": "DeepSeek API Key",
+        "type": "string",
+        "default": ""
+      },
+      "moonshot_key": {
+        "description": "Moonshot(Kimi) API Key",
+        "type": "string",
+        "default": ""
+      }
+    }
   },
-  "target_currencies": {
-    "description": "目标货币代码",
-    "type": "string",
-    "default": "USD,JPY,EUR,GBP,HKD,AUD",
-    "hint": "用英文逗号隔开"
-  },
-  "deepseek_key": {
-    "description": "DeepSeek API Key",
-    "type": "string",
-    "default": "",
-    "hint": "用于查询 DeepSeek 余额"
-  },
-  "moonshot_key": {
-    "description": "Moonshot(Kimi) API Key",
-    "type": "string",
-    "default": "",
-    "hint": "用于查询 Kimi 余额"
+  "news_settings": {
+    "description": "📰 每日新闻模块",
+    "type": "object",
+    "items": {
+      "enable_news": {
+        "description": "[开关] 启用 60s 纯文本新闻",
+        "type": "bool",
+        "default": true
+      }
+    }
   }
 }
