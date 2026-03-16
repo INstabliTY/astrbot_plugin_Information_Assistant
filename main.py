@@ -11,28 +11,57 @@ from astrbot.core.message.components import Plain
 from astrbot.core.message.message_event_result import MessageChain
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-@register("astrbot_plugin_mkt_daily_news", "全能商业助理", "聚合天气、提醒、纯文本新闻与汇率", "1.0.0")
-class MorningNewsPlugin(Star):
+@register("astrbot_plugin_Information_Assistant", "资讯助理", "聚合天气、提醒、纯文本新闻与汇率", "1.0.0")
+class InformationAssistantPlugin(Star):
     def __init__(self, context: Context, config: dict = None):
         super().__init__(context)
         config = config or {}
         self.config = config
         
-        # 基础配置
-        self.target_groups = config.get("target_groups", [])
-        self.push_time = config.get("push_time", "08:00")
-        self.city = config.get("city", "北京")
-        self.exchange_api_key = config.get("exchange_api_key", "")
-        self.base_currency = config.get("base_currency", "CNY").upper()
-        self.target_currencies = config.get("target_currencies", "USD,JPY,EUR,GBP,HKD,AUD").upper().split(',')
-        
-        # AI API 配置
-        self.deepseek_key = config.get("deepseek_key", "")
-        self.moonshot_key = config.get("moonshot_key", "")
+        # 🛡️ 终极兼容提取引擎：无视底层存储是扁平还是嵌套，全量精准捕获！
+        def get_val(section, key, default):
+            # 1. 尝试从新版 UI 的卡片（嵌套字典）里读
+            if section in config and isinstance(config[section], dict) and key in config[section]:
+                return config[section][key]
+            # 2. 尝试从旧版缓存（扁平结构）里读
+            if key in config:
+                return config[key]
+            # 3. 兜底默认值
+            return default
 
-        # 【修复1：规范化数据持久化路径】
-        data_dir = StarTools.get_data_dir()
-        self.reminders_file = data_dir / "reminders.json"
+        # 📦 1. 全局推送设置
+        self.enable_push = get_val("push_settings", "enable_push", True)
+        self.push_time = get_val("push_settings", "push_time", "08:00")
+        self.target_groups = get_val("push_settings", "target_groups", [])
+        self.timezone_offset = get_val("push_settings", "timezone_offset", "10")
+        
+        # 📦 2. 天气模块
+        self.enable_weather = get_val("weather_settings", "enable_weather", True)
+        self.city = get_val("weather_settings", "city", "北京")
+        
+        # 📦 3. 提醒模块
+        self.enable_reminders = get_val("reminder_settings", "enable_reminders", True)
+        
+        # 📦 4. 汇率模块
+        self.enable_exchange = get_val("exchange_settings", "enable_exchange", True)
+        self.exchange_api_key = get_val("exchange_settings", "exchange_api_key", "")
+        self.base_currency = get_val("exchange_settings", "base_currency", "CNY").upper()
+        target_curr_str = get_val("exchange_settings", "target_currencies", "USD,JPY,EUR,GBP,HKD,AUD")
+        self.target_currencies = target_curr_str.upper().split(',')
+        
+        # 📦 5. 余额监控
+        self.enable_balance = get_val("balance_settings", "enable_balance", True)
+        self.deepseek_key = get_val("balance_settings", "deepseek_key", "")
+        self.moonshot_key = get_val("balance_settings", "moonshot_key", "")
+        
+        # 📦 6. 新闻模块
+        news_cfg = config.get("news_settings", {})
+        self.enable_news = news_cfg.get("enable_news", True)
+
+        # 🚨 规范化数据持久化路径 (回归旧版指南中最稳妥的绝对路径)
+        # 直接把账本焊死在插件自己的文件夹里，系统绝对删不掉！
+        plugin_dir = os.path.dirname(os.path.abspath(__file__))
+        self.reminders_file = os.path.join(plugin_dir, "reminders.json")
         
         if not os.path.exists(self.reminders_file):
             with open(self.reminders_file, "w", encoding="utf-8") as f:
@@ -40,23 +69,25 @@ class MorningNewsPlugin(Star):
 
         # 启动定时调度器
         self.scheduler = AsyncIOScheduler()
-        try:
-            hour, minute = self.push_time.split(":")
-            self.scheduler.add_job(
-                self.broadcast_news,
-                'cron',
-                hour=int(hour),
-                minute=int(minute),
-                id="daily_morning_news_job"
-            )
-            self.scheduler.start()
-            logger.info(f"[全能商业助理] 定时任务已设定，每天 {self.push_time} 推送")
-        except Exception as e:
-            logger.error(f"[全能商业助理] 定时任务创建失败: {e}")
+        if self.enable_push:
+            try:
+                hour, minute = self.push_time.split(":")
+                self.scheduler.add_job(
+                    self.broadcast_news,
+                    'cron',
+                    hour=int(hour),
+                    minute=int(minute),
+                    id="daily_information_push_job"
+                )
+                self.scheduler.start()
+                logger.info(f"[资讯助理] 定时任务已设定，每天 {self.push_time} 推送")
+            except Exception as e:
+                logger.error(f"[资讯助理] 定时任务创建失败: {e}")
+        else:
+            logger.info("[资讯助理] 定时推送功能已在配置中关闭，将以纯被动模式运行。")
 
     # ================= 1. 天气与穿衣模块 =================
     async def fetch_weather(self, session):
-        # 【修复2：严格遵守 PEP 8，杜绝单行复合语句】
         if not self.city:
             return ""
             
@@ -95,65 +126,104 @@ class MorningNewsPlugin(Star):
         except Exception:
             return f"🌤️ 【{self.city}天气】数据获取异常。"
 
-    # ================= 2. 提醒事项模块 =================
-    @filter.command("添加提醒")
-    async def add_reminder(self, event: AstrMessageEvent, date: str, *, content: str):
-        # 【修复4：分离日期格式错误与 JSON 解析错误，精准定位潜在缺陷】
+    # ================= 2. 提醒事项模块 (终极双通道版) =================
+    async def _save_to_json(self, date: str, content: str) -> str:
+        """底层的统一写入引擎，同时服务于大模型和手动指令"""
         try:
-            datetime.datetime.strptime(date, "%Y-%m-%d")
+            parsed_date = datetime.datetime.strptime(date, "%Y-%m-%d")
+            standard_date = parsed_date.strftime("%Y-%m-%d")
         except ValueError:
-            yield event.plain_result("❌ 格式错误！请使用：/添加提醒 YYYY-MM-DD 内容")
-            return
+            return f"❌ 解析时间失败，收到格式为：{date}。请使用 YYYY-MM-DD。"
 
-        try:
-            with open(self.reminders_file, "r", encoding="utf-8") as f:
-                reminders = json.load(f)
-        except json.JSONDecodeError:
-            logger.error("reminders.json 文件损坏，尝试重置。")
-            reminders = []
-        except Exception as e:
-            logger.error(f"读取提醒事项文件失败: {e}")
-            yield event.plain_result("❌ 系统错误：无法读取提醒文件。")
-            return
+        reminders = []
+        if os.path.exists(self.reminders_file):
+            try:
+                with open(self.reminders_file, "r", encoding="utf-8") as f:
+                    reminders = json.load(f)
+            except Exception:
+                pass
 
-        reminders.append({"date": date, "content": content})
+        reminders.append({"date": standard_date, "content": content})
         reminders.sort(key=lambda x: x["date"])
         
         try:
             with open(self.reminders_file, "w", encoding="utf-8") as f:
                 json.dump(reminders, f, ensure_ascii=False, indent=2)
-            yield event.plain_result(f"✅ 成功添加提醒：\n日期：{date}\n内容：{content}")
+            return f"✅ 资讯助理待办已记录：\n📅 {standard_date}\n📝 {content}"
         except Exception as e:
-            logger.error(f"写入提醒事项文件失败: {e}")
-            yield event.plain_result("❌ 系统错误：无法保存提醒文件。")
+            logger.error(f"写入提醒文件失败: {e}")
+            return "❌ 系统错误：无法保存提醒文件。"
+
+    @filter.llm_tool(name="add_information_reminder")
+    async def add_reminder_tool(self, event: AstrMessageEvent, date: str, content: str):
+        '''
+        将用户的待办事项添加到资讯助理的本地日程表中。
+        当用户在自然语言聊天中要求“添加提醒”、“记一下待办”或“安排日程”时，你必须调用此工具。
+        
+        Args:
+            date(string): 严格转换为 YYYY-MM-DD 格式的未来日期。请根据当前系统推算。
+            content(string): 待办事项的具体精简内容。
+        '''
+        res = await self._save_to_json(date, content)
+        yield event.plain_result(res)
+
+    @filter.command("添加提醒")
+    async def add_reminder_cmd(self, event: AstrMessageEvent, date: str, *, content: str):
+        """交互指令：手动添加提醒的兜底通道"""
+        res = await self._save_to_json(date, content)
+        yield event.plain_result(res)
 
     def format_reminders(self):
-        try:
-            with open(self.reminders_file, "r", encoding="utf-8") as f:
-                reminders = json.load(f)
-        except json.JSONDecodeError:
-            return "📝 【提醒事项】数据文件损坏。"
-        except Exception:
-            return "📝 【提醒事项】读取失败。"
+        reminders = []
+        if os.path.exists(self.reminders_file):
+            try:
+                with open(self.reminders_file, "r", encoding="utf-8") as f:
+                    reminders = json.load(f)
+            except Exception:
+                return "📝 【提醒事项】数据文件格式损坏，请重新添加。"
 
-        today = datetime.datetime.now().strftime("%Y-%m-%d")
-        this_week = [(datetime.datetime.now() + datetime.timedelta(days=i)).strftime("%Y-%m-%d") for i in range(8)]
+        tz_offset = float(self.timezone_offset) 
+        tz_dynamic = datetime.timezone(datetime.timedelta(hours=tz_offset))
+        today_dt = datetime.datetime.now(tz_dynamic)
+        today_str = today_dt.strftime("%Y-%m-%d")
         
-        today_list = [r for r in reminders if r['date'] == today]
+        this_week_strs = [(today_dt + datetime.timedelta(days=i)).strftime("%Y-%m-%d") for i in range(1, 8)]
+
+        today_list = []
+        week_list = []
+
+        for r in reminders:
+            try:
+                saved_date_obj = datetime.datetime.strptime(r['date'], "%Y-%m-%d")
+                normalized_date_str = saved_date_obj.strftime("%Y-%m-%d")
+                
+                if normalized_date_str == today_str:
+                    today_list.append(r)
+                elif normalized_date_str in this_week_strs:
+                    week_list.append(r)
+            except ValueError:
+                continue
+
+        res = ""
         if today_list:
-            res = "📝 【今日待办】\n"
+            res += "📝 【今日待办】\n"
             for r in today_list:
                 res += f"✅ {r['content']}\n"
-            return res.strip()
+            res += "\n"
             
-        week_list = [r for r in reminders if r['date'] in this_week]
         if week_list:
-            res = "📝 【本周预警】\n"
+            res += "📝 【本周预警】\n"
             for r in week_list:
-                res += f"📅 {r['date'][5:]}: {r['content']}\n"
-            return res.strip()
+                try:
+                    nd = datetime.datetime.strptime(r['date'], "%Y-%m-%d").strftime("%Y-%m-%d")
+                    res += f"📅 {nd[5:]}: {r['content']}\n"
+                except Exception:
+                    res += f"📅 {r['date'][5:]}: {r['content']}\n"
+                
+        if not res:
+            return "📝 【提醒事项】近期无安排，享受生活吧！"
             
-        return "📝 【提醒事项】近期无安排，享受生活吧！"
+        return res.strip()
 
     # ================= 3. 纯文本新闻与汇率模块 =================
     async def fetch_60s_news_text(self, session):
@@ -170,7 +240,6 @@ class MorningNewsPlugin(Star):
                             
                         text = "📰 【每日60s纯文本速报】\n\n"
                         for i, item in enumerate(news_items, 1):
-                            # 带有物理空格的换行，防止 Telegram 自动吞空行
                             text += f"{i}. {item}\n \n"
                         
                         return text.strip()
@@ -232,61 +301,72 @@ class MorningNewsPlugin(Star):
             pass
         return "- Kimi: 查询异常"
 
-    # ================= 核心装配与推送逻辑 =================
-    async def broadcast_news(self):
-        logger.info("[全能商业助理] 开始组装并推送纯文本战报...")
+    # ================= 核心情报组装引擎 =================
+    async def build_news_text(self) -> str:
+        """纯粹的数据拉取与组装中心，不负责发送"""
+        logger.info("[资讯助理] 开始组装并拉取情报...")
         
+        async def skip_task(): return ""
+
         timeout = aiohttp.ClientTimeout(total=20)
         async with aiohttp.ClientSession(timeout=timeout) as session:
-            # 【修复3：同步逻辑与异步并发彻底分离】
-            # 先单独执行极速的同步操作
-            reminders_text = self.format_reminders()
-            
-            # 再打包需要网络请求的异步任务
             tasks = [
-                self.fetch_weather(session),
-                self.fetch_exchange_rates(session),
-                self.fetch_deepseek_balance(session),
-                self.fetch_moonshot_balance(session),
-                self.fetch_60s_news_text(session)
+                self.fetch_weather(session) if self.enable_weather else skip_task(),
+                self.fetch_exchange_rates(session) if self.enable_exchange else skip_task(),
+                self.fetch_deepseek_balance(session) if self.enable_balance else skip_task(),
+                self.fetch_moonshot_balance(session) if self.enable_balance else skip_task(),
+                self.fetch_60s_news_text(session) if self.enable_news else skip_task()
             ]
             
-            # 并发执行
             results = await asyncio.gather(*tasks, return_exceptions=True)
 
-        # 按并发顺序解包
         weather_text = results[0] if not isinstance(results[0], Exception) else "🌤️ 【天气】获取超时"
         exchange_text = results[1] if not isinstance(results[1], Exception) else "📊 【汇率】获取超时"
         ds_balance = results[2] if not isinstance(results[2], Exception) else "- DeepSeek: 超时"
         ms_balance = results[3] if not isinstance(results[3], Exception) else "- Kimi: 超时"
         news_text = results[4] if not isinstance(results[4], Exception) else "📰 【新闻】获取超时"
         
-        balance_text = f"💰 【API 资产监控】\n{ds_balance}\n{ms_balance}"
+        reminders_text = self.format_reminders() if self.enable_reminders else ""
         
-        divider = "\n\n---------------------------\n\n"
-        final_text = (
-            weather_text + divider + 
-            reminders_text + divider + 
-            exchange_text + divider + 
-            balance_text + divider + 
-            news_text
-        )
+        blocks = []
+        if self.enable_weather and weather_text: blocks.append(weather_text)
+        if self.enable_reminders and reminders_text: blocks.append(reminders_text)
+        if self.enable_exchange and exchange_text: blocks.append(exchange_text)
+        if self.enable_balance:
+            blocks.append(f"💰 【API 资产监控】\n{ds_balance}\n{ms_balance}")
+        if self.enable_news and news_text: blocks.append(news_text)
         
+        if not blocks:
+            return "📭 资讯助理：所有情报模块已在后台关闭。"
+        else:
+            divider = "\n\n---------------------------\n\n"
+            return divider.join(blocks)
+
+    # ================= 定时推送逻辑 =================
+    async def broadcast_news(self):
+        if not self.target_groups:
+            logger.warning("[资讯助理] 定时推送已触发，但未配置推送目标群组 (target_groups)。")
+            return
+            
+        final_text = await self.build_news_text()
         message_chain = MessageChain([Plain(final_text)])
 
         for target in self.target_groups:
             try:
                 await self.context.send_message(target, message_chain)
-                logger.info(f"[全能商业助理] 成功送达: {target}")
+                logger.info(f"[资讯助理] 定时早报成功送达: {target}")
                 await asyncio.sleep(1)
             except Exception as e:
-                logger.error(f"[全能商业助理] 送达失败: {e}")
+                logger.error(f"[资讯助理] 送达失败: {e}")
 
+    # ================= 交互触发逻辑 =================
     @filter.command("今日情报")
     async def manual_trigger(self, event: AstrMessageEvent):
         """交互指令：手动触发"""
-        yield event.plain_result("🚀 正在拉取宏观数据与全网简报 (约3秒)，请稍候...")
-        await self.broadcast_news()
+        yield event.plain_result("🚀 资讯助理正在为您拉取最新情报 (约需3-5秒)，请稍候...")
+        
+        final_text = await self.build_news_text()
+        yield event.plain_result(final_text)
 
     async def terminate(self):
         if self.scheduler.running:
