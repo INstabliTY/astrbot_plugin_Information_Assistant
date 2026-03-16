@@ -1,373 +1,539 @@
-import os
-import json
+"""
+AstrBot 资讯助理插件 (Information Assistant)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+聚合天气、提醒、纯文本新闻、汇率与 API 余额监控。
+
+Author : INstabliTY
+Version: v1.2.0
+"""
+
 import asyncio
-import traceback
-import aiohttp
 import datetime
-from astrbot.api.event import filter, AstrMessageEvent
-from astrbot.api.star import Context, Star, register, StarTools
+import json
+import os
+import traceback
+
+import aiohttp
+
 from astrbot.api import logger
+from astrbot.api.event import AstrMessageEvent, filter
+from astrbot.api.star import Context, Star, register
 from astrbot.core.message.components import Plain
 from astrbot.core.message.message_event_result import MessageChain
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-@register("astrbot_plugin_Information_Assistant", "资讯助理", "聚合天气、提醒、纯文本新闻与汇率", "1.0.0")
+
+# ---------------------------------------------------------------------------
+# 辅助常量
+# ---------------------------------------------------------------------------
+_DIVIDER = "\n\n---------------------------\n\n"
+
+
+# ---------------------------------------------------------------------------
+# 插件主类
+# ---------------------------------------------------------------------------
+
+@register(
+    "astrbot_plugin_Information_Assistant",
+    "资讯助理",
+    "聚合天气、提醒、纯文本新闻与汇率",
+    "1.2.0",
+)
 class InformationAssistantPlugin(Star):
-    def __init__(self, context: Context, config: dict = None):
+    """资讯助理插件主类。"""
+
+    def __init__(self, context: Context, config: dict | None = None) -> None:
         super().__init__(context)
-        config = config or {}
-        self.config = config
-        
-        # 🛡️ 终极兼容提取引擎：无视底层存储是扁平还是嵌套，全量精准捕获！
-        def get_val(section, key, default):
-            # 1. 尝试从新版 UI 的卡片（嵌套字典）里读
-            if section in config and isinstance(config[section], dict) and key in config[section]:
-                return config[section][key]
-            # 2. 尝试从旧版缓存（扁平结构）里读
-            if key in config:
-                return config[key]
-            # 3. 兜底默认值
+        cfg = config or {}
+
+        # --- 工具函数：兼容新版嵌套结构与旧版扁平结构 ---
+        def _get(section: str, key: str, default):
+            section_data = cfg.get(section)
+            if isinstance(section_data, dict) and key in section_data:
+                return section_data[key]
+            if key in cfg:
+                return cfg[key]
             return default
 
-        # 📦 1. 全局推送设置
-        self.enable_push = get_val("push_settings", "enable_push", True)
-        self.push_time = get_val("push_settings", "push_time", "08:00")
-        self.target_groups = get_val("push_settings", "target_groups", [])
-        self.timezone_offset = get_val("push_settings", "timezone_offset", "10")
-        
-        # 📦 2. 天气模块
-        self.enable_weather = get_val("weather_settings", "enable_weather", True)
-        self.city = get_val("weather_settings", "city", "北京")
-        
-        # 📦 3. 提醒模块
-        self.enable_reminders = get_val("reminder_settings", "enable_reminders", True)
-        
-        # 📦 4. 汇率模块
-        self.enable_exchange = get_val("exchange_settings", "enable_exchange", True)
-        self.exchange_api_key = get_val("exchange_settings", "exchange_api_key", "")
-        self.base_currency = get_val("exchange_settings", "base_currency", "CNY").upper()
-        target_curr_str = get_val("exchange_settings", "target_currencies", "USD,JPY,EUR,GBP,HKD,AUD")
-        self.target_currencies = target_curr_str.upper().split(',')
-        
-        # 📦 5. 余额监控
-        self.enable_balance = get_val("balance_settings", "enable_balance", True)
-        self.deepseek_key = get_val("balance_settings", "deepseek_key", "")
-        self.moonshot_key = get_val("balance_settings", "moonshot_key", "")
-        
-        # 📦 6. 新闻模块
-        news_cfg = config.get("news_settings", {})
-        self.enable_news = news_cfg.get("enable_news", True)
+        # 全局推送设置
+        self.enable_push: bool = _get("push_settings", "enable_push", True)
+        self.push_time: str = _get("push_settings", "push_time", "08:00")
+        self.target_groups: list[str] = _get("push_settings", "target_groups", [])
+        self.timezone_offset: float = self._parse_tz_offset(
+            _get("push_settings", "timezone_offset", "10")
+        )
 
-        # 🚨 规范化数据持久化路径 (回归旧版指南中最稳妥的绝对路径)
-        # 直接把账本焊死在插件自己的文件夹里，系统绝对删不掉！
-        plugin_dir = os.path.dirname(os.path.abspath(__file__))
-        self.reminders_file = os.path.join(plugin_dir, "reminders.json")
-        
+        # 天气模块
+        self.enable_weather: bool = _get("weather_settings", "enable_weather", True)
+        self.city: str = _get("weather_settings", "city", "北京")
+
+        # 提醒模块
+        self.enable_reminders: bool = _get("reminder_settings", "enable_reminders", True)
+
+        # 汇率模块
+        self.enable_exchange: bool = _get("exchange_settings", "enable_exchange", True)
+        self.exchange_api_key: str = _get("exchange_settings", "exchange_api_key", "")
+        self.base_currency: str = _get(
+            "exchange_settings", "base_currency", "CNY"
+        ).upper()
+        raw_currencies: str = _get(
+            "exchange_settings", "target_currencies", "USD,JPY,EUR,GBP,HKD,AUD"
+        )
+        self.target_currencies: list[str] = [
+            c.strip().upper() for c in raw_currencies.split(",") if c.strip()
+        ]
+
+        # 余额监控
+        self.enable_balance: bool = _get("balance_settings", "enable_balance", True)
+        self.deepseek_key: str = _get("balance_settings", "deepseek_key", "")
+        self.moonshot_key: str = _get("balance_settings", "moonshot_key", "")
+
+        # 新闻模块
+        self.enable_news: bool = _get("news_settings", "enable_news", True)
+
+        # 数据持久化路径：遵循官方指南，存放于 data/ 目录而非插件自身目录，
+        # 防止插件更新/重装时数据被覆盖。
+        data_dir = os.path.join("data", "plugin_data", "information_assistant")
+        os.makedirs(data_dir, exist_ok=True)
+        self.reminders_file: str = os.path.join(data_dir, "reminders.json")
+        self._ensure_reminders_file()
+
+        # 启动定时推送任务（使用框架推荐的 asyncio.create_task）
+        self._push_task: asyncio.Task | None = None
+        if self.enable_push:
+            self._push_task = asyncio.create_task(self._push_loop())
+            logger.info(f"[资讯助理] 定时任务已启动，每天 {self.push_time} 推送。")
+        else:
+            logger.info("[资讯助理] 定时推送已关闭，以纯被动模式运行。")
+
+    # -----------------------------------------------------------------------
+    # 初始化工具方法
+    # -----------------------------------------------------------------------
+
+    @staticmethod
+    def _parse_tz_offset(raw: str) -> float:
+        """将时区偏移配置项解析为浮点数，容错范围 UTC-12 ~ UTC+14。"""
+        try:
+            offset = float(str(raw).strip())
+            return max(-12.0, min(14.0, offset))
+        except (ValueError, TypeError):
+            logger.warning(f"[资讯助理] 时区配置 '{raw}' 无效，已回退至 UTC+10。")
+            return 10.0
+
+    def _ensure_reminders_file(self) -> None:
+        """若提醒文件不存在则初始化为空列表。"""
         if not os.path.exists(self.reminders_file):
             with open(self.reminders_file, "w", encoding="utf-8") as f:
                 json.dump([], f)
 
-        # 启动定时调度器
-        self.scheduler = AsyncIOScheduler()
-        if self.enable_push:
-            try:
-                hour, minute = self.push_time.split(":")
-                self.scheduler.add_job(
-                    self.broadcast_news,
-                    'cron',
-                    hour=int(hour),
-                    minute=int(minute),
-                    id="daily_information_push_job"
-                )
-                self.scheduler.start()
-                logger.info(f"[资讯助理] 定时任务已设定，每天 {self.push_time} 推送")
-            except Exception as e:
-                logger.error(f"[资讯助理] 定时任务创建失败: {e}")
-        else:
-            logger.info("[资讯助理] 定时推送功能已在配置中关闭，将以纯被动模式运行。")
+    # -----------------------------------------------------------------------
+    # 1. 天气模块
+    # -----------------------------------------------------------------------
 
-    # ================= 1. 天气与穿衣模块 =================
-    async def fetch_weather(self, session):
+    async def fetch_weather(self, session: aiohttp.ClientSession) -> str:
+        """获取今日天气及穿衣建议。"""
         if not self.city:
             return ""
-            
-        geo_url = f"https://geocoding-api.open-meteo.com/v1/search?name={self.city}&count=1&language=zh"
+        geo_url = (
+            f"https://geocoding-api.open-meteo.com/v1/search"
+            f"?name={self.city}&count=1&language=zh"
+        )
         try:
             async with session.get(geo_url) as resp:
                 geo_data = await resp.json()
-                if not geo_data.get("results"):
-                    return f"🌤️ 【{self.city}天气】获取失败，请检查拼写。"
-                lat = geo_data["results"][0]["latitude"]
-                lon = geo_data["results"][0]["longitude"]
-            
-            weather_url = f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}&daily=temperature_2m_max,temperature_2m_min,precipitation_probability_max&timezone=auto"
+            results = geo_data.get("results")
+            if not results:
+                return f"🌤️ 【{self.city}天气】获取失败，请检查城市名拼写。"
+            lat = results[0]["latitude"]
+            lon = results[0]["longitude"]
+
+            weather_url = (
+                f"https://api.open-meteo.com/v1/forecast"
+                f"?latitude={lat}&longitude={lon}"
+                f"&daily=temperature_2m_max,temperature_2m_min,precipitation_probability_max"
+                f"&timezone=auto"
+            )
             async with session.get(weather_url) as resp:
                 data = await resp.json()
-                temp_max = data["daily"]["temperature_2m_max"][0]
-                temp_min = data["daily"]["temperature_2m_min"][0]
-                rain_prob = data["daily"]["precipitation_probability_max"][0]
-                
-                if rain_prob > 40:
-                    umbrella = "☔ 降水概率高，出门带伞！"
-                else:
-                    umbrella = "🌂 降水概率低，无需带伞。"
-                    
-                avg_temp = (temp_max + temp_min) / 2
-                if avg_temp < 10:
-                    clothes = "🧥 天寒，建议厚外套/羽绒服。"
-                elif avg_temp < 20:
-                    clothes = "🧣 微凉，建议夹克/薄毛衣。"
-                elif avg_temp < 28:
-                    clothes = "👕 舒适，建议长袖/薄外套。"
-                else:
-                    clothes = "🩳 炎热，建议清凉夏装。"
-                
-                return f"🌤️ 【{self.city}今日天气】\n🌡️ 温度：{temp_min}℃ ~ {temp_max}℃\n🌧️ 降水概率：{rain_prob}%\n{umbrella}\n{clothes}"
+
+            daily = data["daily"]
+            temp_max = daily["temperature_2m_max"][0]
+            temp_min = daily["temperature_2m_min"][0]
+            rain_prob = daily["precipitation_probability_max"][0]
+
+            umbrella = "☔ 降水概率高，出门带伞！" if rain_prob > 40 else "🌂 降水概率低，无需带伞。"
+            avg_temp = (temp_max + temp_min) / 2
+            if avg_temp < 10:
+                clothes = "🧥 天寒，建议厚外套/羽绒服。"
+            elif avg_temp < 20:
+                clothes = "🧣 微凉，建议夹克/薄毛衣。"
+            elif avg_temp < 28:
+                clothes = "👕 舒适，建议长袖/薄外套。"
+            else:
+                clothes = "🩳 炎热，建议清凉夏装。"
+
+            return (
+                f"🌤️ 【{self.city}今日天气】\n"
+                f"🌡️ 温度：{temp_min}℃ ~ {temp_max}℃\n"
+                f"🌧️ 降水概率：{rain_prob}%\n"
+                f"{umbrella}\n{clothes}"
+            )
         except Exception:
+            logger.debug(f"[资讯助理] 天气获取异常：{traceback.format_exc()}")
             return f"🌤️ 【{self.city}天气】数据获取异常。"
 
-    # ================= 2. 提醒事项模块 (终极双通道版) =================
-    async def _save_to_json(self, date: str, content: str) -> str:
-        """底层的统一写入引擎，同时服务于大模型和手动指令"""
-        try:
-            parsed_date = datetime.datetime.strptime(date, "%Y-%m-%d")
-            standard_date = parsed_date.strftime("%Y-%m-%d")
-        except ValueError:
-            return f"❌ 解析时间失败，收到格式为：{date}。请使用 YYYY-MM-DD。"
+    # -----------------------------------------------------------------------
+    # 2. 提醒模块
+    # -----------------------------------------------------------------------
 
-        reminders = []
-        if os.path.exists(self.reminders_file):
-            try:
-                with open(self.reminders_file, "r", encoding="utf-8") as f:
-                    reminders = json.load(f)
-            except Exception:
-                pass
+    async def _load_reminders(self) -> list[dict]:
+        """从磁盘异步读取提醒列表。"""
+        def _read():
+            if not os.path.exists(self.reminders_file):
+                return []
+            with open(self.reminders_file, "r", encoding="utf-8") as f:
+                return json.load(f)
 
-        reminders.append({"date": standard_date, "content": content})
-        reminders.sort(key=lambda x: x["date"])
-        
         try:
+            return await asyncio.to_thread(_read)
+        except (json.JSONDecodeError, OSError):
+            logger.warning("[资讯助理] reminders.json 读取失败，已返回空列表。")
+            return []
+
+    async def _save_reminders(self, reminders: list[dict]) -> None:
+        """将提醒列表异步写入磁盘。"""
+        def _write():
             with open(self.reminders_file, "w", encoding="utf-8") as f:
                 json.dump(reminders, f, ensure_ascii=False, indent=2)
-            return f"✅ 资讯助理待办已记录：\n📅 {standard_date}\n📝 {content}"
-        except Exception as e:
-            logger.error(f"写入提醒文件失败: {e}")
-            return "❌ 系统错误：无法保存提醒文件。"
 
-    @filter.llm_tool(name="add_information_reminder")
-    async def add_reminder_tool(self, event: AstrMessageEvent, date: str, content: str):
-        '''
-        将用户的待办事项添加到资讯助理的本地日程表中。
-        当用户在自然语言聊天中要求“添加提醒”、“记一下待办”或“安排日程”时，你必须调用此工具。
-        
-        Args:
-            date(string): 严格转换为 YYYY-MM-DD 格式的未来日期。请根据当前系统推算。
-            content(string): 待办事项的具体精简内容。
-        '''
-        res = await self._save_to_json(date, content)
-        yield event.plain_result(res)
+        try:
+            await asyncio.to_thread(_write)
+        except OSError as exc:
+            logger.error(f"[资讯助理] 写入提醒文件失败：{exc}")
 
-    @filter.command("添加提醒")
-    async def add_reminder_cmd(self, event: AstrMessageEvent, date: str, *, content: str):
-        """交互指令：手动添加提醒的兜底通道"""
-        res = await self._save_to_json(date, content)
-        yield event.plain_result(res)
+    async def _add_reminder(self, date_str: str, content: str) -> str:
+        """
+        将一条提醒写入本地 reminders.json。
+        这是双通道写入机制的核心：无论通过 LLM 工具还是手动指令触发，
+        均调用此方法，确保数据写入插件自有的持久化文件，
+        不依赖框架 CronJob 数据库（插件无法读取后者）。
+        """
+        try:
+            parsed = datetime.datetime.strptime(date_str.strip(), "%Y-%m-%d")
+            standard_date = parsed.strftime("%Y-%m-%d")
+        except ValueError:
+            return f"❌ 日期格式错误：收到 '{date_str}'，请使用 YYYY-MM-DD 格式。"
 
-    def format_reminders(self):
-        reminders = []
-        if os.path.exists(self.reminders_file):
-            try:
-                with open(self.reminders_file, "r", encoding="utf-8") as f:
-                    reminders = json.load(f)
-            except Exception:
-                return "📝 【提醒事项】数据文件格式损坏，请重新添加。"
+        reminders = await self._load_reminders()
+        reminders.append({"date": standard_date, "content": content.strip()})
+        reminders.sort(key=lambda r: r["date"])
+        await self._save_reminders(reminders)
+        return f"✅ 资讯助理待办已记录：\n📅 {standard_date}\n📝 {content.strip()}"
 
-        tz_offset = float(self.timezone_offset) 
-        tz_dynamic = datetime.timezone(datetime.timedelta(hours=tz_offset))
-        today_dt = datetime.datetime.now(tz_dynamic)
-        today_str = today_dt.strftime("%Y-%m-%d")
-        
-        this_week_strs = [(today_dt + datetime.timedelta(days=i)).strftime("%Y-%m-%d") for i in range(1, 8)]
+    async def format_reminders(self) -> str:
+        """格式化输出今日待办和本周预警。"""
+        reminders = await self._load_reminders()
+        tz = datetime.timezone(datetime.timedelta(hours=self.timezone_offset))
+        now = datetime.datetime.now(tz)
+        today_str = now.strftime("%Y-%m-%d")
+        this_week = {
+            (now + datetime.timedelta(days=i)).strftime("%Y-%m-%d")
+            for i in range(1, 8)
+        }
 
-        today_list = []
-        week_list = []
+        today_items: list[dict] = []
+        week_items: list[dict] = []
 
         for r in reminders:
             try:
-                saved_date_obj = datetime.datetime.strptime(r['date'], "%Y-%m-%d")
-                normalized_date_str = saved_date_obj.strftime("%Y-%m-%d")
-                
-                if normalized_date_str == today_str:
-                    today_list.append(r)
-                elif normalized_date_str in this_week_strs:
-                    week_list.append(r)
-            except ValueError:
+                d = datetime.datetime.strptime(r["date"], "%Y-%m-%d").strftime(
+                    "%Y-%m-%d"
+                )
+            except (ValueError, KeyError):
                 continue
+            if d == today_str:
+                today_items.append(r)
+            elif d in this_week:
+                week_items.append(r)
 
-        res = ""
-        if today_list:
-            res += "📝 【今日待办】\n"
-            for r in today_list:
-                res += f"✅ {r['content']}\n"
-            res += "\n"
-            
-        if week_list:
-            res += "📝 【本周预警】\n"
-            for r in week_list:
-                try:
-                    nd = datetime.datetime.strptime(r['date'], "%Y-%m-%d").strftime("%Y-%m-%d")
-                    res += f"📅 {nd[5:]}: {r['content']}\n"
-                except Exception:
-                    res += f"📅 {r['date'][5:]}: {r['content']}\n"
-                
-        if not res:
-            return "📝 【提醒事项】近期无安排，享受生活吧！"
-            
-        return res.strip()
+        parts: list[str] = []
+        if today_items:
+            lines = "\n".join(f"✅ {r['content']}" for r in today_items)
+            parts.append(f"📝 【今日待办】\n{lines}")
+        if week_items:
+            lines = "\n".join(
+                f"📅 {r['date'][5:]}: {r['content']}" for r in week_items
+            )
+            parts.append(f"📝 【本周预警】\n{lines}")
 
-    # ================= 3. 纯文本新闻与汇率模块 =================
-    async def fetch_60s_news_text(self, session):
-        urls = ["https://60s.viki.moe/v2/60s", "https://60s-api.114128.xyz/v2/60s"]
+        return "\n\n".join(parts) if parts else "📝 【提醒事项】近期无安排，享受生活吧！"
+
+    # -----------------------------------------------------------------------
+    # 3. 新闻模块
+    # -----------------------------------------------------------------------
+
+    async def fetch_60s_news_text(self, session: aiohttp.ClientSession) -> str:
+        """获取 60s 纯文本新闻（多 URL 降级容错）。"""
+        urls = [
+            "https://60s.viki.moe/v2/60s",
+            "https://60s-api.114128.xyz/v2/60s",
+        ]
         for url in urls:
             try:
                 async with session.get(url) as resp:
-                    if resp.status == 200:
-                        data = await resp.json()
-                        news_items = data.get("data", {}).get("news", [])
-                        
-                        if not news_items:
-                            continue
-                            
-                        text = "📰 【每日60s纯文本速报】\n\n"
-                        for i, item in enumerate(news_items, 1):
-                            text += f"{i}. {item}\n \n"
-                        
-                        return text.strip()
+                    if resp.status != 200:
+                        continue
+                    data = await resp.json()
+                    news_items: list[str] = data.get("data", {}).get("news", [])
+                    if not news_items:
+                        continue
+                    body = "\n \n".join(
+                        f"{i}. {item}" for i, item in enumerate(news_items, 1)
+                    )
+                    return f"📰 【每日60s纯文本速报】\n\n{body}"
             except Exception:
                 continue
         return "📰 【新闻速报】获取失败，接口波动。"
 
-    async def fetch_exchange_rates(self, session):
+    # -----------------------------------------------------------------------
+    # 4. 汇率模块
+    # -----------------------------------------------------------------------
+
+    async def fetch_exchange_rates(self, session: aiohttp.ClientSession) -> str:
+        """获取实时汇率（以 base_currency 为基准）。"""
         if not self.exchange_api_key:
-            return "📊 【汇率】⚠️ 未配置 API Key"
-            
-        url = f"https://v6.exchangerate-api.com/v6/{self.exchange_api_key}/latest/{self.base_currency}"
+            return "📊 【汇率】⚠️ 未配置 API Key。"
+        url = (
+            f"https://v6.exchangerate-api.com/v6/{self.exchange_api_key}"
+            f"/latest/{self.base_currency}"
+        )
         try:
             async with session.get(url) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    rates = data.get("conversion_rates", {})
-                    text = f"📊 【实时汇率】(100外币 兑 {self.base_currency})\n"
-                    for cur in self.target_currencies:
-                        cur = cur.strip()
-                        if cur in rates and rates[cur] != 0:
-                            rate_value = 100 / rates[cur]
-                            text += f"- {cur}: {rate_value:.2f}\n"
-                    return text.strip()
+                if resp.status != 200:
+                    return "📊 【汇率】API 请求失败。"
+                data = await resp.json()
+            rates = data.get("conversion_rates", {})
+            lines: list[str] = []
+            for cur in self.target_currencies:
+                if cur in rates and rates[cur] != 0:
+                    lines.append(f"- {cur}: {100 / rates[cur]:.2f}")
+            if not lines:
+                return "📊 【汇率】暂无有效汇率数据。"
+            return f"📊 【实时汇率】(100外币 兑 {self.base_currency})\n" + "\n".join(lines)
         except Exception:
-            pass
-        return "📊 【汇率】数据获取失败。"
+            logger.debug(f"[资讯助理] 汇率获取异常：{traceback.format_exc()}")
+            return "📊 【汇率】数据获取失败。"
 
-    # ================= 4. API 余额监控模块 =================
-    async def fetch_deepseek_balance(self, session):
+    # -----------------------------------------------------------------------
+    # 5. API 余额监控
+    # -----------------------------------------------------------------------
+
+    async def fetch_deepseek_balance(self, session: aiohttp.ClientSession) -> str:
+        """查询 DeepSeek API 余额。"""
         if not self.deepseek_key:
             return "- DeepSeek: 未配置"
-            
-        url = "https://api.deepseek.com/user/balance"
         try:
-            async with session.get(url, headers={"Authorization": f"Bearer {self.deepseek_key}"}) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    infos = data.get("balance_infos", [])
-                    if infos:
-                        balances = [f"{info.get('total_balance')} {info.get('currency')}" for info in infos]
-                        return f"- DeepSeek: {' / '.join(balances)}"
+            headers = {"Authorization": f"Bearer {self.deepseek_key}"}
+            async with session.get(
+                "https://api.deepseek.com/user/balance", headers=headers
+            ) as resp:
+                if resp.status != 200:
+                    return "- DeepSeek: 查询失败"
+                data = await resp.json()
+            infos: list[dict] = data.get("balance_infos", [])
+            if infos:
+                balances = " / ".join(
+                    f"{i.get('total_balance')} {i.get('currency')}" for i in infos
+                )
+                return f"- DeepSeek: {balances}"
         except Exception:
-            pass
+            logger.debug(f"[资讯助理] DeepSeek 余额查询异常：{traceback.format_exc()}")
         return "- DeepSeek: 查询异常"
 
-    async def fetch_moonshot_balance(self, session):
+    async def fetch_moonshot_balance(self, session: aiohttp.ClientSession) -> str:
+        """查询 Moonshot (Kimi) API 余额。"""
         if not self.moonshot_key:
             return "- Kimi: 未配置"
-            
-        url = "https://api.moonshot.cn/v1/users/me/balance"
         try:
-            async with session.get(url, headers={"Authorization": f"Bearer {self.moonshot_key}"}) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    available = data.get("data", {}).get("available_balance", 0)
-                    return f"- Kimi: ￥{available:.2f}"
+            headers = {"Authorization": f"Bearer {self.moonshot_key}"}
+            async with session.get(
+                "https://api.moonshot.cn/v1/users/me/balance", headers=headers
+            ) as resp:
+                if resp.status != 200:
+                    return "- Kimi: 查询失败"
+                data = await resp.json()
+            available = data.get("data", {}).get("available_balance", 0)
+            return f"- Kimi: ￥{available:.2f}"
         except Exception:
-            pass
+            logger.debug(f"[资讯助理] Kimi 余额查询异常：{traceback.format_exc()}")
         return "- Kimi: 查询异常"
 
-    # ================= 核心情报组装引擎 =================
+    # -----------------------------------------------------------------------
+    # 核心情报组装
+    # -----------------------------------------------------------------------
+
     async def build_news_text(self) -> str:
-        """纯粹的数据拉取与组装中心，不负责发送"""
-        logger.info("[资讯助理] 开始组装并拉取情报...")
-        
-        async def skip_task(): return ""
+        """并发拉取所有数据模块，组装成最终情报文本。"""
+        logger.info("[资讯助理] 开始并发拉取情报...")
+
+        async def _skip() -> str:
+            return ""
 
         timeout = aiohttp.ClientTimeout(total=20)
         async with aiohttp.ClientSession(timeout=timeout) as session:
-            tasks = [
-                self.fetch_weather(session) if self.enable_weather else skip_task(),
-                self.fetch_exchange_rates(session) if self.enable_exchange else skip_task(),
-                self.fetch_deepseek_balance(session) if self.enable_balance else skip_task(),
-                self.fetch_moonshot_balance(session) if self.enable_balance else skip_task(),
-                self.fetch_60s_news_text(session) if self.enable_news else skip_task()
-            ]
-            
-            results = await asyncio.gather(*tasks, return_exceptions=True)
+            results = await asyncio.gather(
+                self.fetch_weather(session) if self.enable_weather else _skip(),
+                self.fetch_exchange_rates(session) if self.enable_exchange else _skip(),
+                self.fetch_deepseek_balance(session) if self.enable_balance else _skip(),
+                self.fetch_moonshot_balance(session) if self.enable_balance else _skip(),
+                self.fetch_60s_news_text(session) if self.enable_news else _skip(),
+                return_exceptions=True,
+            )
 
-        weather_text = results[0] if not isinstance(results[0], Exception) else "🌤️ 【天气】获取超时"
-        exchange_text = results[1] if not isinstance(results[1], Exception) else "📊 【汇率】获取超时"
-        ds_balance = results[2] if not isinstance(results[2], Exception) else "- DeepSeek: 超时"
-        ms_balance = results[3] if not isinstance(results[3], Exception) else "- Kimi: 超时"
-        news_text = results[4] if not isinstance(results[4], Exception) else "📰 【新闻】获取超时"
-        
-        reminders_text = self.format_reminders() if self.enable_reminders else ""
-        
-        blocks = []
-        if self.enable_weather and weather_text: blocks.append(weather_text)
-        if self.enable_reminders and reminders_text: blocks.append(reminders_text)
-        if self.enable_exchange and exchange_text: blocks.append(exchange_text)
+        def _safe(result, fallback: str) -> str:
+            return result if not isinstance(result, Exception) else fallback
+
+        weather_text = _safe(results[0], "🌤️ 【天气】获取超时")
+        exchange_text = _safe(results[1], "📊 【汇率】获取超时")
+        ds_balance = _safe(results[2], "- DeepSeek: 超时")
+        ms_balance = _safe(results[3], "- Kimi: 超时")
+        news_text = _safe(results[4], "📰 【新闻】获取超时")
+
+        reminders_text = await self.format_reminders() if self.enable_reminders else ""
+
+        blocks: list[str] = []
+        if self.enable_weather and weather_text:
+            blocks.append(weather_text)
+        if self.enable_reminders and reminders_text:
+            blocks.append(reminders_text)
+        if self.enable_exchange and exchange_text:
+            blocks.append(exchange_text)
         if self.enable_balance:
             blocks.append(f"💰 【API 资产监控】\n{ds_balance}\n{ms_balance}")
-        if self.enable_news and news_text: blocks.append(news_text)
-        
+        if self.enable_news and news_text:
+            blocks.append(news_text)
+
         if not blocks:
             return "📭 资讯助理：所有情报模块已在后台关闭。"
-        else:
-            divider = "\n\n---------------------------\n\n"
-            return divider.join(blocks)
+        return _DIVIDER.join(blocks)
 
-    # ================= 定时推送逻辑 =================
-    async def broadcast_news(self):
+    # -----------------------------------------------------------------------
+    # 定时推送循环（asyncio 原生实现，无需第三方调度器）
+    # -----------------------------------------------------------------------
+
+    async def _push_loop(self) -> None:
+        """
+        持续运行的定时推送循环。
+        每次计算距下次推送时间的剩余秒数并 sleep，避免漂移。
+        """
+        hour, minute = self._parse_push_time(self.push_time)
+        logger.info(f"[资讯助理] 推送循环启动，目标时间 {hour:02d}:{minute:02d}。")
+
+        while True:
+            seconds = self._seconds_until(hour, minute)
+            logger.debug(f"[资讯助理] 距下次推送还有 {seconds:.0f} 秒。")
+            await asyncio.sleep(seconds)
+            try:
+                await self._broadcast()
+            except Exception:
+                logger.error(f"[资讯助理] 广播异常：{traceback.format_exc()}")
+
+    @staticmethod
+    def _parse_push_time(push_time: str) -> tuple[int, int]:
+        """将 'HH:MM' 字符串解析为 (hour, minute)，格式错误时返回默认值 (8, 0)。"""
+        try:
+            parts = push_time.strip().split(":")
+            h, m = int(parts[0]), int(parts[1])
+            if 0 <= h <= 23 and 0 <= m <= 59:
+                return h, m
+        except (ValueError, IndexError, AttributeError):
+            pass
+        logger.warning(f"[资讯助理] 推送时间 '{push_time}' 格式无效，已回退至 08:00。")
+        return 8, 0
+
+    def _seconds_until(self, hour: int, minute: int) -> float:
+        """计算从当前时刻到指定时刻的剩余秒数（始终为正，跨越午夜时 +24h）。"""
+        tz = datetime.timezone(datetime.timedelta(hours=self.timezone_offset))
+        now = datetime.datetime.now(tz)
+        target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        if target <= now:
+            target += datetime.timedelta(days=1)
+        return (target - now).total_seconds()
+
+    async def _broadcast(self) -> None:
+        """向所有目标群组推送今日情报。"""
         if not self.target_groups:
-            logger.warning("[资讯助理] 定时推送已触发，但未配置推送目标群组 (target_groups)。")
+            logger.warning("[资讯助理] 定时推送已触发，但未配置 target_groups，跳过。")
             return
-            
         final_text = await self.build_news_text()
-        message_chain = MessageChain([Plain(final_text)])
-
+        chain = MessageChain([Plain(final_text)])
         for target in self.target_groups:
             try:
-                await self.context.send_message(target, message_chain)
-                logger.info(f"[资讯助理] 定时早报成功送达: {target}")
-                await asyncio.sleep(1)
-            except Exception as e:
-                logger.error(f"[资讯助理] 送达失败: {e}")
+                await self.context.send_message(target, chain)
+                logger.info(f"[资讯助理] 早报已送达：{target}")
+            except Exception as exc:
+                logger.error(f"[资讯助理] 送达 '{target}' 失败：{exc}")
+            await asyncio.sleep(1)
 
-    # ================= 交互触发逻辑 =================
+    # -----------------------------------------------------------------------
+    # 指令处理器
+    # -----------------------------------------------------------------------
+
     @filter.command("今日情报")
     async def manual_trigger(self, event: AstrMessageEvent):
-        """交互指令：手动触发"""
-        yield event.plain_result("🚀 资讯助理正在为您拉取最新情报 (约需3-5秒)，请稍候...")
-        
-        final_text = await self.build_news_text()
-        yield event.plain_result(final_text)
+        """手动触发一次完整情报推送。"""
+        yield event.plain_result("🚀 资讯助理正在拉取情报（约 3-5 秒），请稍候...")
+        text = await self.build_news_text()
+        yield event.plain_result(text)
 
-    async def terminate(self):
-        if self.scheduler.running:
-            self.scheduler.shutdown(wait=False)
+    @filter.command("添加提醒")
+    async def add_reminder_cmd(self, event: AstrMessageEvent):
+        """
+        手动添加提醒指令。
+        用法：/添加提醒 YYYY-MM-DD 事项内容
+        示例：/添加提醒 2026-04-01 记得交作业
+        """
+        raw: str = event.message_str.strip()
+        # 去掉命令前缀后的剩余部分
+        body = raw.removeprefix("/添加提醒").removeprefix("添加提醒").strip()
+        parts = body.split(None, 1)  # 按空白字符分割，最多分成 2 份
+        if len(parts) < 2:
+            yield event.plain_result(
+                "❌ 格式错误。\n用法：/添加提醒 YYYY-MM-DD 事项内容\n"
+                "示例：/添加提醒 2026-04-01 记得交作业"
+            )
+            return
+        date_str, content = parts[0], parts[1]
+        result = await self._add_reminder(date_str, content)
+        yield event.plain_result(result)
+
+    @filter.llm_tool(name="add_information_reminder")
+    async def add_reminder_tool(
+        self, event: AstrMessageEvent, date: str, content: str
+    ):
+        """
+        将用户的待办事项添加到资讯助理的本地日程表中。
+
+        当用户在自然语言聊天中要求"添加提醒"、"记一下待办"或"安排日程"时，
+        必须调用此工具。此工具直接写入插件本地 reminders.json，
+        独立于框架系统的 CronJob 数据库，确保数据在情报推送时可读。
+
+        Args:
+            date(string): 严格转换为 YYYY-MM-DD 格式的目标日期。
+            content(string): 待办事项的精简内容描述。
+        """
+        result = await self._add_reminder(date, content)
+        yield event.plain_result(result)
+
+    # -----------------------------------------------------------------------
+    # 生命周期
+    # -----------------------------------------------------------------------
+
+    async def terminate(self) -> None:
+        """插件卸载/重载时，取消后台推送任务。"""
+        if self._push_task and not self._push_task.done():
+            self._push_task.cancel()
+            try:
+                await self._push_task
+            except asyncio.CancelledError:
+                pass
+        logger.info("[资讯助理] 插件已安全停止。")
