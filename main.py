@@ -4,7 +4,7 @@ AstrBot 资讯助理插件 (Information Assistant)
 聚合天气、提醒、纯文本新闻、汇率与 API 余额监控。
 
 Author : INstabliTY
-Version: v1.2.3
+Version: v1.2.4
 """
 
 import asyncio
@@ -36,7 +36,7 @@ _DIVIDER = "\n\n---------------------------\n\n"
     "astrbot_plugin_Information_Assistant",
     "资讯助理",
     "聚合天气、提醒、纯文本新闻与汇率",
-    "1.2.3",
+    "1.2.4",
 )
 class InformationAssistantPlugin(Star):
     """资讯助理插件主类。"""
@@ -54,26 +54,9 @@ class InformationAssistantPlugin(Star):
         # 文件操作锁：防止并发写入时后写覆盖先写，导致提醒数据丢失。
         self._file_lock: asyncio.Lock = asyncio.Lock()
 
-        # 启动定时推送任务。
-        # asyncio.create_task() 要求当前线程存在 running event loop（AstrBot 初始化时
-        # 通常已满足）。显式检测确保在非预期环境下给出明确日志而非 RuntimeError。
+        # 定时推送任务在 on_loaded() 中延迟启动（框架生命周期钩子），
+        # 确保 AstrBot 异步上下文完全就绪后再创建任务，避免 RuntimeError。
         self._push_task: asyncio.Task | None = None
-        if self.enable_push:
-            try:
-                loop = asyncio.get_running_loop()
-            except RuntimeError:
-                loop = None
-
-            if loop is not None:
-                self._push_task = asyncio.create_task(self._push_loop())
-                logger.info(f"[资讯助理] 定时任务已启动，每天 {self.push_time} 推送。")
-            else:
-                logger.warning(
-                    "[资讯助理] 未检测到 running event loop，定时推送任务无法启动。"
-                    "请确认插件在 AstrBot 异步上下文中加载。"
-                )
-        else:
-            logger.info("[资讯助理] 定时推送已关闭，以纯被动模式运行。")
 
     def _parse_config(self, cfg: dict) -> None:
         """
@@ -95,7 +78,9 @@ class InformationAssistantPlugin(Star):
         raw_groups = _get("push_settings", "target_groups", [])
         # 兼容字符串配置（如误填 "12345"）和标准列表两种形式
         if isinstance(raw_groups, list):
-            self.target_groups: list[str] = [str(g) for g in raw_groups if g]
+            self.target_groups: list[str] = [
+                str(g).strip() for g in raw_groups if g and str(g).strip()
+            ]
         elif isinstance(raw_groups, str) and raw_groups.strip():
             # 单个字符串视为逗号分隔的列表
             self.target_groups = [g.strip() for g in raw_groups.split(",") if g.strip()]
@@ -263,13 +248,18 @@ class InformationAssistantPlugin(Star):
                 valid.append(item)
             else:
                 logger.debug(f"[资讯助理] 跳过不合法的提醒条目：{item!r}")
-        return self._purge_expired(valid)
+        kept, dropped = self._purge_expired(valid)
+        # 若有过期条目被清除，触发一次持锁原子回写，保持磁盘与内存同步。
+        if dropped:
+            asyncio.create_task(self._persist_purge(kept))
+        return kept
 
     def _purge_expired(self, reminders: list[dict]) -> list[dict]:
         """
-        清除早于今天（N 天前）的过期提醒，防止文件无限膨胀。
-        保留今天及未来的所有条目；过期 N 天以上的条目被丢弃并记录日志。
-        N 默认为 0，即仅保留今天及之后的提醒（昨天及更早的自动清理）。
+        过滤掉早于今天的过期提醒，防止文件无限膨胀。
+        仅返回清理后的内存列表；将结果写回磁盘的职责由调用方（_load_reminders）
+        在检测到有条目被删除时通过 _schedule_purge_write() 异步完成，
+        保持本方法为纯同步、无 IO 副作用的函数。
         """
         tz = datetime.timezone(datetime.timedelta(hours=self.timezone_offset))
         today = datetime.datetime.now(tz).date()
@@ -285,8 +275,19 @@ class InformationAssistantPlugin(Star):
             except (ValueError, KeyError):
                 kept.append(r)  # 格式异常的条目保留，由上游校验处理
         if dropped:
-            logger.debug(f"[资讯助理] 已清除 {dropped} 条过期提醒。")
-        return kept
+            logger.debug(f"[资讯助理] 内存中清除 {dropped} 条过期提醒，将异步回写磁盘。")
+        return kept, dropped  # 返回 dropped 数量供调用方决策是否回写
+
+    async def _persist_purge(self, reminders: list[dict]) -> None:
+        """将过期清理后的提醒列表回写磁盘（在 _file_lock 保护下），
+        保证磁盘文件与内存状态一致，防止重启后过期数据复活。
+        """
+        async with self._file_lock:
+            try:
+                await self._atomic_write(reminders)
+                logger.debug("[资讯助理] 过期提醒已回写磁盘。")
+            except OSError as exc:
+                logger.warning(f"[资讯助理] 过期提醒回写失败（非致命）：{exc}")
 
     async def _atomic_write(self, reminders: list[dict]) -> None:
         """
@@ -302,18 +303,6 @@ class InformationAssistantPlugin(Star):
             os.replace(tmp_file, self.reminders_file)
 
         await asyncio.to_thread(_do_write)
-
-    async def _save_reminders(self, reminders: list[dict]) -> None:
-        """
-        公共接口：持锁后执行原子写入。
-        供外部或独立调用路径使用（_add_reminder 内部直接调用 _atomic_write
-        以避免在已持有锁的上下文中重复 acquire）。
-        """
-        async with self._file_lock:
-            try:
-                await self._atomic_write(reminders)
-            except OSError as exc:
-                logger.error(f"[资讯助理] 原子写入提醒文件失败：{exc}")
 
     async def _add_reminder(self, date_str: str, content: str) -> str:
         """
@@ -435,7 +424,10 @@ class InformationAssistantPlugin(Star):
         try:
             async with session.get(url) as resp:
                 if resp.status != 200:
-                    logger.warning(f"[资讯助理] 汇率 API 返回 HTTP {resp.status}，接口：{url}")
+                    logger.warning(
+                        f"[资讯助理] 汇率 API 返回 HTTP {resp.status}，"
+                        f"接口域名：exchangerate-api.com，货币：{self.base_currency}"
+                    )
                     return "📊 【汇率】API 请求失败。"
                 data = await resp.json()
             rates = data.get("conversion_rates", {})
@@ -456,7 +448,7 @@ class InformationAssistantPlugin(Star):
         except aiohttp.ClientError as exc:
             logger.warning(f"[资讯助理] 汇率请求网络错误：{exc}")
             return "📊 【汇率】网络请求失败。"
-        except (KeyError, ValueError, json.JSONDecodeError) as exc:
+        except (KeyError, ValueError, TypeError, json.JSONDecodeError) as exc:
             logger.warning(f"[资讯助理] 汇率数据解析错误：{exc}")
             return "📊 【汇率】数据解析异常。"
         except asyncio.TimeoutError:
@@ -487,10 +479,10 @@ class InformationAssistantPlugin(Star):
                 return f"- DeepSeek: {balances}"
         except aiohttp.ClientError as exc:
             logger.warning(f"[资讯助理] DeepSeek 请求网络错误：{exc}")
-        except (KeyError, ValueError, json.JSONDecodeError) as exc:
+        except (KeyError, ValueError, TypeError, json.JSONDecodeError) as exc:
             logger.warning(f"[资讯助理] DeepSeek 数据解析错误：{exc}")
         except asyncio.TimeoutError:
-            pass
+            logger.warning("[资讯助理] DeepSeek 余额查询超时")
         return "- DeepSeek: 查询异常"
 
     async def fetch_moonshot_balance(self, session: aiohttp.ClientSession) -> str:
@@ -510,10 +502,10 @@ class InformationAssistantPlugin(Star):
             return f"- Kimi: ￥{available:.2f}"
         except aiohttp.ClientError as exc:
             logger.warning(f"[资讯助理] Kimi 请求网络错误：{exc}")
-        except (KeyError, ValueError, json.JSONDecodeError) as exc:
+        except (KeyError, ValueError, TypeError, json.JSONDecodeError) as exc:
             logger.warning(f"[资讯助理] Kimi 数据解析错误：{exc}")
         except asyncio.TimeoutError:
-            pass
+            logger.warning("[资讯助理] Kimi 余额查询超时")
         return "- Kimi: 查询异常"
 
     # -----------------------------------------------------------------------
@@ -676,8 +668,22 @@ class InformationAssistantPlugin(Star):
         return result
 
     # -----------------------------------------------------------------------
-    # 生命周期
+    # 生命周期钩子
     # -----------------------------------------------------------------------
+
+    async def on_loaded(self) -> None:
+        """
+        框架加载完成钩子：在 AstrBot 异步上下文完全就绪后启动定时推送任务。
+        相比在 __init__ 中直接调用 asyncio.create_task()，此处能保证
+        event loop 已经 running，不会触发 RuntimeError。
+        """
+        if not self.enable_push:
+            logger.info("[资讯助理] 定时推送已关闭，以纯被动模式运行。")
+            return
+        if self._push_task is not None and not self._push_task.done():
+            return  # 防止重复启动
+        self._push_task = asyncio.create_task(self._push_loop())
+        logger.info(f"[资讯助理] 定时任务已启动，每天 {self.push_time} 推送。")
 
     async def terminate(self) -> None:
         """插件卸载/重载时，取消后台推送任务。"""
