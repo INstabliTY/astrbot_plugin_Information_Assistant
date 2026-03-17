@@ -6,7 +6,7 @@
 
 **聚合天气、提醒、纯文本新闻、汇率与 API 余额监控**
 
-[![version](https://img.shields.io/badge/version-1.2.0-blue.svg)](#) [![license](https://img.shields.io/badge/license-MIT-green.svg)](#) [![AstrBot](https://img.shields.io/badge/AstrBot->=4.20.0-orange.svg)](#)
+[![version](https://img.shields.io/badge/version-1.2.1-blue.svg)](#) [![license](https://img.shields.io/badge/license-MIT-green.svg)](#) [![AstrBot](https://img.shields.io/badge/AstrBot->=4.20.0-orange.svg)](#)
 
 </div>
 
