@@ -76,7 +76,7 @@ git clone https://github.com/INstabliTY/astrbot_plugin_Information_Assistant.git
 | 启用每日定时推送 | 主开关，关闭后只响应手动指令 |
 | 每日推送时间 | 24 小时制，格式 `HH:MM`，如 `08:30` |
 | 推送目标 ID 列表 | 格式：`平台:消息类型:目标ID`。Telegram 私聊填 `telegram:FriendMessage:你的数字ID`；QQ 群填 `aiocqhttp:GroupMessage:群号` |
-| 运行时区（UTC 偏移量） | 中国大陆 `8`；澳洲东部标准时 `10`，夏令时 `11`；UTC 填 `0` |
+| 运行时区（UTC 偏移量） | 中国大陆 `8`；澳洲东部标准时 `10`，夏令时 `11`； |
 
 ### 🌤️ 天气模块
 | 配置项 | 说明 |
