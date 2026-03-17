@@ -4,7 +4,7 @@ AstrBot 资讯助理插件 (Information Assistant)
 聚合天气、提醒、纯文本新闻、汇率与 API 余额监控。
 
 Author : INstabliTY
-Version: v1.2.2
+Version: v1.2.3
 """
 
 import asyncio
@@ -36,7 +36,7 @@ _DIVIDER = "\n\n---------------------------\n\n"
     "astrbot_plugin_Information_Assistant",
     "资讯助理",
     "聚合天气、提醒、纯文本新闻与汇率",
-    "1.2.2",
+    "1.2.3",
 )
 class InformationAssistantPlugin(Star):
     """资讯助理插件主类。"""
@@ -54,11 +54,24 @@ class InformationAssistantPlugin(Star):
         # 文件操作锁：防止并发写入时后写覆盖先写，导致提醒数据丢失。
         self._file_lock: asyncio.Lock = asyncio.Lock()
 
-        # 启动定时推送任务（使用框架推荐的 asyncio.create_task）
+        # 启动定时推送任务。
+        # asyncio.create_task() 要求当前线程存在 running event loop（AstrBot 初始化时
+        # 通常已满足）。显式检测确保在非预期环境下给出明确日志而非 RuntimeError。
         self._push_task: asyncio.Task | None = None
         if self.enable_push:
-            self._push_task = asyncio.create_task(self._push_loop())
-            logger.info(f"[资讯助理] 定时任务已启动，每天 {self.push_time} 推送。")
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                loop = None
+
+            if loop is not None:
+                self._push_task = asyncio.create_task(self._push_loop())
+                logger.info(f"[资讯助理] 定时任务已启动，每天 {self.push_time} 推送。")
+            else:
+                logger.warning(
+                    "[资讯助理] 未检测到 running event loop，定时推送任务无法启动。"
+                    "请确认插件在 AstrBot 异步上下文中加载。"
+                )
         else:
             logger.info("[资讯助理] 定时推送已关闭，以纯被动模式运行。")
 
@@ -163,6 +176,7 @@ class InformationAssistantPlugin(Star):
                 geo_data = await resp.json()
             results = geo_data.get("results")
             if not results:
+                logger.warning(f"[资讯助理] 天气地理编码无结果，城市：{self.city}")
                 return f"🌤️ 【{self.city}天气】获取失败，请检查城市名拼写。"
             lat = results[0]["latitude"]
             lon = results[0]["longitude"]
@@ -249,35 +263,69 @@ class InformationAssistantPlugin(Star):
                 valid.append(item)
             else:
                 logger.debug(f"[资讯助理] 跳过不合法的提醒条目：{item!r}")
-        return valid
+        return self._purge_expired(valid)
 
-    async def _save_reminders(self, reminders: list[dict]) -> None:
+    def _purge_expired(self, reminders: list[dict]) -> list[dict]:
         """
-        将提醒列表原子性地写入磁盘，并使用文件锁防止并发竞态。
+        清除早于今天（N 天前）的过期提醒，防止文件无限膨胀。
+        保留今天及未来的所有条目；过期 N 天以上的条目被丢弃并记录日志。
+        N 默认为 0，即仅保留今天及之后的提醒（昨天及更早的自动清理）。
+        """
+        tz = datetime.timezone(datetime.timedelta(hours=self.timezone_offset))
+        today = datetime.datetime.now(tz).date()
+        kept: list[dict] = []
+        dropped = 0
+        for r in reminders:
+            try:
+                item_date = datetime.date.fromisoformat(r["date"])
+                if item_date >= today:
+                    kept.append(r)
+                else:
+                    dropped += 1
+            except (ValueError, KeyError):
+                kept.append(r)  # 格式异常的条目保留，由上游校验处理
+        if dropped:
+            logger.debug(f"[资讯助理] 已清除 {dropped} 条过期提醒。")
+        return kept
 
-        写入策略：先写临时文件，再用 os.replace() 原子替换目标文件。
-        即使写入过程中断，也不会损坏已有的 reminders.json。
-        asyncio.Lock 确保同一时刻只有一个协程持有写权限。
+    async def _atomic_write(self, reminders: list[dict]) -> None:
+        """
+        底层原子写入：先写 .tmp 临时文件，再 os.replace() 替换目标文件。
+        即使写入途中中断，也不会损坏已有的 reminders.json。
+        调用方负责持有 _file_lock，此方法本身不加锁。
         """
         tmp_file = self.reminders_file + ".tmp"
 
-        def _atomic_write():
+        def _do_write():
             with open(tmp_file, "w", encoding="utf-8") as f:
                 json.dump(reminders, f, ensure_ascii=False, indent=2)
             os.replace(tmp_file, self.reminders_file)
 
+        await asyncio.to_thread(_do_write)
+
+    async def _save_reminders(self, reminders: list[dict]) -> None:
+        """
+        公共接口：持锁后执行原子写入。
+        供外部或独立调用路径使用（_add_reminder 内部直接调用 _atomic_write
+        以避免在已持有锁的上下文中重复 acquire）。
+        """
         async with self._file_lock:
             try:
-                await asyncio.to_thread(_atomic_write)
+                await self._atomic_write(reminders)
             except OSError as exc:
                 logger.error(f"[资讯助理] 原子写入提醒文件失败：{exc}")
 
     async def _add_reminder(self, date_str: str, content: str) -> str:
         """
         将一条提醒写入本地 reminders.json。
+
         这是双通道写入机制的核心：无论通过 LLM 工具还是手动指令触发，
         均调用此方法，确保数据写入插件自有的持久化文件，
         不依赖框架 CronJob 数据库（插件无法读取后者）。
+
+        整个「读 → 改 → 写」事务在同一把 _file_lock 下串行执行，
+        彻底消除并发竞态：任何并发的"添加提醒"调用都会排队等待，
+        而不是各自读到旧列表后相互覆盖。
         """
         try:
             parsed = datetime.datetime.strptime(date_str.strip(), "%Y-%m-%d")
@@ -285,10 +333,18 @@ class InformationAssistantPlugin(Star):
         except ValueError:
             return f"❌ 日期格式错误：收到 '{date_str}'，请使用 YYYY-MM-DD 格式。"
 
-        reminders = await self._load_reminders()
-        reminders.append({"date": standard_date, "content": content.strip()})
-        reminders.sort(key=lambda r: r["date"])
-        await self._save_reminders(reminders)
+        async with self._file_lock:
+            # 在锁内完成读→改→写。直接调用不加锁的 _atomic_write，
+            # 防止 asyncio.Lock（非可重入）在同一协程中二次 acquire 死锁。
+            reminders = await self._load_reminders()
+            reminders.append({"date": standard_date, "content": content.strip()})
+            reminders.sort(key=lambda r: r["date"])
+            try:
+                await self._atomic_write(reminders)
+            except OSError as exc:
+                logger.error(f"[资讯助理] 保存提醒失败：{exc}")
+                return "❌ 系统错误：提醒保存失败，请重试。"
+
         return f"✅ 资讯助理待办已记录：\n📅 {standard_date}\n📝 {content.strip()}"
 
     async def format_reminders(self) -> str:
@@ -343,6 +399,7 @@ class InformationAssistantPlugin(Star):
             try:
                 async with session.get(url) as resp:
                     if resp.status != 200:
+                        logger.warning(f"[资讯助理] 新闻接口 {url} 返回 HTTP {resp.status}")
                         continue
                     data = await resp.json()
                     news_items: list[str] = data.get("data", {}).get("news", [])
@@ -378,16 +435,24 @@ class InformationAssistantPlugin(Star):
         try:
             async with session.get(url) as resp:
                 if resp.status != 200:
+                    logger.warning(f"[资讯助理] 汇率 API 返回 HTTP {resp.status}，接口：{url}")
                     return "📊 【汇率】API 请求失败。"
                 data = await resp.json()
             rates = data.get("conversion_rates", {})
             lines: list[str] = []
             for cur in self.target_currencies:
-                if cur in rates and rates[cur] != 0:
-                    lines.append(f"- {cur}: {100 / rates[cur]:.2f}")
+                rate = rates.get(cur)
+                if rate and rate != 0:
+                    # rate = 1 {base} 能换多少 {cur}
+                    # 用户更关心的是"花多少本币换100外币"，即反向汇率
+                    cost = 100 / rate  # 100 {cur} 需要多少 {base}
+                    lines.append(
+                        f"- {cur}：1 {self.base_currency} = {rate:.4f} {cur}"
+                        f"  |  100 {cur} ≈ {cost:.2f} {self.base_currency}"
+                    )
             if not lines:
                 return "📊 【汇率】暂无有效汇率数据。"
-            return f"📊 【实时汇率】(100外币 兑 {self.base_currency})\n" + "\n".join(lines)
+            return f"📊 【实时汇率】\n" + "\n".join(lines)
         except aiohttp.ClientError as exc:
             logger.warning(f"[资讯助理] 汇率请求网络错误：{exc}")
             return "📊 【汇率】网络请求失败。"
@@ -411,6 +476,7 @@ class InformationAssistantPlugin(Star):
                 "https://api.deepseek.com/user/balance", headers=headers
             ) as resp:
                 if resp.status != 200:
+                    logger.warning(f"[资讯助理] DeepSeek 余额 API 返回 HTTP {resp.status}")
                     return "- DeepSeek: 查询失败"
                 data = await resp.json()
             infos: list[dict] = data.get("balance_infos", [])
@@ -437,6 +503,7 @@ class InformationAssistantPlugin(Star):
                 "https://api.moonshot.cn/v1/users/me/balance", headers=headers
             ) as resp:
                 if resp.status != 200:
+                    logger.warning(f"[资讯助理] Kimi 余额 API 返回 HTTP {resp.status}")
                     return "- Kimi: 查询失败"
                 data = await resp.json()
             available = data.get("data", {}).get("available_balance", 0)
