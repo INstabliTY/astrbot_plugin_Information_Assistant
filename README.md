@@ -137,7 +137,9 @@ git clone https://github.com/INstabliTY/astrbot_plugin_Information_Assistant.git
 
 ---
 
-## 📅 更新日志（仅重大更新）
+## 📅 更新日志
+
+此版块后续仅通知重大更新内容，更多详细信息请移步release（发布）
 
 ### 🚀 v1.3.1
 
