@@ -4,7 +4,7 @@ AstrBot 资讯助理插件 (Information Assistant)
 聚合天气、提醒、纯文本新闻、汇率与 API 余额监控。
 
 Author : INstabliTY
-Version: v1.5.0
+Version: v1.4.0
 """
 
 import asyncio
