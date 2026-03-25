@@ -2,7 +2,7 @@ name: astrbot_plugin_Information_Assistant
 display_name: 资讯助理
 desc: 聚合天气、提醒、纯文本新闻、汇率与 API 余额监控。
 help: 发送“今日情报”或设置定时推送
-version: v1.3.9
+version: v1.4.0
 author: INstabliTY
 repo: https://github.com/INstabliTY/astrbot_plugin_Information_Assistant
 support_platforms:
