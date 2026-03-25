@@ -4,11 +4,12 @@ AstrBot 资讯助理插件 (Information Assistant)
 聚合天气、提醒、纯文本新闻、汇率与 API 余额监控。
 
 Author : INstabliTY
-Version: v1.3.2
+Version: v1.3.9
 """
 
 import asyncio
 import datetime
+import hashlib
 import json
 import os
 import sqlite3
@@ -37,7 +38,7 @@ _DIVIDER = "\n\n---------------------------\n\n"
     "astrbot_plugin_Information_Assistant",
     "资讯助理",
     "聚合天气、提醒、纯文本新闻与汇率",
-    "1.3.1",
+    "1.3.9",
 )
 class InformationAssistantPlugin(Star):
     """资讯助理插件主类。"""
@@ -52,8 +53,12 @@ class InformationAssistantPlugin(Star):
         data_dir.mkdir(parents=True, exist_ok=True)
         self.reminders_file: str = str(data_dir / "reminders.json")
         self._ensure_reminders_file()
+        self.reminder_cache_file: str = str(data_dir / "reminder_cache.json")
         # 文件操作锁：防止并发写入时后写覆盖先写，导致提醒数据丢失。
         self._file_lock: asyncio.Lock = asyncio.Lock()
+        # 提醒摘要缓存（内存层），避免每次推送重复调用 LLM
+        self._reminder_cache: dict[str, str] = {}
+        self._cache_loaded: bool = False
 
         # 按框架指南推荐，直接在 __init__ 中用 asyncio.create_task() 注册后台任务。
         # AstrBot 的插件加载机制保证 __init__ 在事件循环运行后才被调用，
@@ -166,6 +171,41 @@ class InformationAssistantPlugin(Star):
         if not os.path.exists(self.reminders_file):
             with open(self.reminders_file, "w", encoding="utf-8") as f:
                 json.dump([], f)
+
+    @staticmethod
+    def _cache_key(content: str, run_time: str) -> str:
+        """以 content+run_time 的 SHA1 前16位作为缓存键，唯一标识一条提醒。"""
+        raw = (content + "|" + run_time).encode("utf-8")
+        return hashlib.sha1(raw).hexdigest()[:16]
+
+    async def _load_cache(self) -> None:
+        """从磁盘加载提醒摘要缓存到内存（只在首次调用时执行）。"""
+        if self._cache_loaded:
+            return
+        def _read():
+            if not os.path.exists(self.reminder_cache_file):
+                return {}
+            with open(self.reminder_cache_file, "r", encoding="utf-8") as f:
+                return json.load(f)
+        try:
+            data = await asyncio.to_thread(_read)
+            self._reminder_cache = data if isinstance(data, dict) else {}
+        except Exception:
+            self._reminder_cache = {}
+        self._cache_loaded = True
+
+    async def _save_cache(self) -> None:
+        """将内存缓存原子写入磁盘。"""
+        cache_snapshot = dict(self._reminder_cache)
+        tmp = self.reminder_cache_file + ".tmp"
+        def _write():
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(cache_snapshot, f, ensure_ascii=False, indent=2)
+            os.replace(tmp, self.reminder_cache_file)
+        try:
+            await asyncio.to_thread(_write)
+        except OSError as exc:
+            logger.warning(f"[资讯助理] 提醒缓存写入失败（非致命）：{exc}")
 
     # -----------------------------------------------------------------------
     # 1. 天气模块
@@ -490,16 +530,79 @@ class InformationAssistantPlugin(Star):
             logger.warning(f"[资讯助理] 系统任务查询异常：{exc}")
             return []
 
+    @staticmethod
+    def _format_reminder_local(raw: str) -> str:
+        """
+        纯规则本地格式化，不依赖任何 LLM，作为提醒摘要的终极兜底。
+        只返回「标签」内容，不含时间——时间由装配层统一拼接。
+        """
+        import re
+
+        # ── 1. 提取标签（兼容【】[]/「」三种括号）────────────────────────────
+        tag = ""
+        tag_match = re.search(r"[【\[「]([^】\]」]{1,25})[】\]」]", raw)
+        if tag_match:
+            inner = tag_match.group(1)
+            inner = re.sub(
+                r"(预警|提醒|通知|警告|警报|alert)", "", inner, flags=re.IGNORECASE
+            ).strip()
+            if inner:
+                tag = "「" + inner + "」"
+
+        # ── 2. 提取核心事项 ──────────────────────────────────────────────────
+        core = raw
+        # 删去所有标签括号内容（含「」）
+        core = re.sub(r"[【\[「][^】\]」]{1,30}[】\]」]", "", core)
+        # 删去括号内时间注释，如（3月20日周五）
+        core = re.sub(r"[（(][^）)]{1,30}[）)]", "", core)
+        # 删去时间表达式（含 HH:MM-HH:MM 时间范围）
+        core = re.sub(
+            r"(大后天|本周[一二三四五六七日天]|下周[一二三四五六七日天]|"
+            r"今天|明天|后天|本周|下周|这周|今晚|今早|"
+            r"上午|下午|晚上|早上|凌晨|"
+            r"\d{1,2}:\d{2}(-\d{1,2}:\d{2})?|"
+            r"\d{1,2}[点时]\d{0,2}(分)?|"
+            r"\d{4}-\d{2}-\d{2}|"
+            r"\d{1,2}月\d{1,2}[日号]|"
+            r"周[一二三四五六七日天])",
+            "", core
+        )
+        # 遇到句末语气词和标点截断（含"吗""呢""啊"等疑问/感叹语气词）
+        core = re.split(r"[？！?!。吗呢啊]", core)[0]
+        # 删去行末时间尾词和连字符残留
+        core = re.sub(r"\s*(之前|以前|前|到|截止|-)\s*$", "", core.strip())
+        # 删去开头的称谓和语气词
+        core = re.sub(r"^[是的了到在和与兄弟，,、\s]+", "", core).strip()
+        # 删去行末"写了""做了"等无实义动补结构
+        core = re.sub(r"(写了|做了|完了|好了)\s*$", "", core.strip())
+        # 清理多余标点和空白
+        core = re.sub(r"[，。、；：,;.\-\s]+$", "", core.strip())
+        core = re.sub(r"\s{2,}", " ", core).strip()
+
+        if not core:
+            fallback = re.sub(r"[【\[「][^】\]」]{1,30}[】\]」]", "", raw).strip()
+            core = fallback[:30]
+        else:
+            core = core[:40]
+
+        # ── 3. 拼装（只返回内容，不含时间）─────────────────────────────────
+        return (tag + core) if tag else core
+
     async def _parse_reminder_text(self, raw: str, date_str: str, run_time: str = "") -> str:
         """
-        用 AstrBot 内置 LLM 将原始提醒文本提炼为一行简洁摘要。
-        格式：{标签}{核心事项}  {时间描述}
-        例：【ECON7000】CLEAR-JE 1 DDL  明天下午4点（3月20日周五）
-        LLM 不可用时自动降级为截取原文前60字。
+        将原始提醒文本提炼为一行简洁摘要。
+
+        策略：
+        - 优先调用 LLM（1次，不重试）获得高质量摘要
+        - LLM 不可用或调用失败（包括 429/过载）→ 立即切换本地规则格式化
+        - 本地规则基于正则，零延迟，确保提醒永远能正常展示
+
+        之所以不重试：模型过载时反复重试只会阻塞情报推送，
+        本地格式化已能提供可读的结果，没必要为等待 LLM 而延误整份情报。
         """
+        # ── 尝试 LLM（仅一次，失败立刻降级）────────────────────────────────
         provider = None
         try:
-            # 优先使用用户在配置中指定的模型；留空则使用当前默认提供商
             if self.reminder_provider:
                 provider = self.context.get_provider_by_id(self.reminder_provider)
             if provider is None:
@@ -507,178 +610,50 @@ class InformationAssistantPlugin(Star):
         except Exception:
             pass
 
-        if provider is None:
-            return raw[:60] + ("…" if len(raw) > 60 else "")
-
-        time_info = ("，该提醒的实际执行时间为 " + run_time) if run_time else ""
-        time_anchor = run_time if run_time else date_str
-        prompt_lines = [
-            "今天是 " + date_str + time_info + "。",
-            "请将以下提醒文本提炼为一行简洁摘要，严格按格式输出：",
-            "  「标签」核心事项  时间描述",
-            "规则（必须遵守）：",
-            "1. 标签：原文【】内的课程/项目名，用「」包裹；若无方括号则省略标签",
-            "2. 核心事项：最简动宾短语，删去解释、提问、感叹句",
-            "3. 时间描述：基于实际执行时间 " + time_anchor + " 生成，",
-            "   ★ 严禁直接复制原文中出现的「明天」「后天」「本周」等相对时间词",
-            "   ★ 若有具体时刻（如 09:00 或 08:00-11:00），必须完整输出",
-            "   ★ 若无具体时刻，时间描述部分留空，不要输出任何内容",
-            "4. 只输出结果这一行，不要加任何解释",
-            "原始提醒：" + raw,
-        ]
-        prompt = "\n".join(prompt_lines)
-
-        # 最多重试 2 次，遇到 429/过载错误时指数退避等待
-        last_exc: Exception | None = None
-        for attempt in range(3):
+        if provider is not None:
+            prompt_lines = [
+                "将以下提醒原文提炼为极简一行，只输出内容本身，不含时间。",
+                "格式（严格遵守，无方括号则省略「」部分）：「课程/项目名」动宾短语",
+                "规则：",
+                "1.「」内填原文【】中的课程/项目名，删去「预警」「通知」「警报」等修饰词",
+                "2. 动宾短语：5-10字，说明做什么事，删去称呼、感叹、提问、解释",
+                "3. 不要输出任何时间信息（时间由系统另行处理）",
+                "4. 只输出这一行，不加任何说明",
+                "原文：" + raw,
+            ]
             try:
-                resp = await provider.text_chat(
-                    prompt=prompt,
-                    session_id=None,
-                    image_urls=[],
-                    func_tool=None,
+                # 超时 20 秒；缓存机制保证大多数情况下不调用 LLM
+                resp = await asyncio.wait_for(
+                    provider.text_chat(
+                        prompt="\n".join(prompt_lines),
+                        session_id=None,
+                        image_urls=[],
+                        func_tool=None,
+                    ),
+                    timeout=20.0,
                 )
                 first_line = resp.completion_text.strip().split("\n")[0].strip()
-                return first_line if first_line else raw[:60]
+                if first_line:
+                    return first_line
+            except asyncio.TimeoutError:
+                logger.debug("[资讯助理] 提醒格式化 LLM 超时，使用本地规则")
             except Exception as exc:
-                last_exc = exc
-                exc_str = str(exc)
-                # 429 / 过载 / 限流 → 等待后重试；其他错误直接降级
-                if any(k in exc_str for k in ("429", "overload", "rate_limit", "too many")):
-                    wait = 3 * (attempt + 1)  # 3s, 6s
-                    logger.debug(f"[资讯助理] 提醒格式化遇到限流（{exc_str[:60]}），{wait}s 后重试（第{attempt+1}次）")
-                    await asyncio.sleep(wait)
-                else:
-                    break  # 非限流错误，不重试
-        logger.debug(f"[资讯助理] 提醒格式化 LLM 调用失败：{last_exc}")
-        return raw[:60] + ("…" if len(raw) > 60 else "")
+                logger.debug(f"[资讯助理] 提醒格式化 LLM 失败，使用本地规则：{str(exc)[:80]}")
+
+        # ── 本地规则兜底（零延迟，永不失败）────────────────────────────────
+        return self._format_reminder_local(raw)
 
     async def format_reminders(self) -> str:
         """
-        格式化输出今日待办和本周预警。
-
-        数据来源合并两路：
-        1. 插件自有 reminders.json（/添加提醒 手动指令写入的用户自定义备忘）
-        2. AstrBot 系统 cron_jobs 数据库（LLM 通过 create_future_task 添加的提醒）
-
-        每条提醒原文经 _parse_reminder_text() 用 LLM 提炼为简洁一行摘要，
-        若 LLM 不可用则自动降级为截断原文。
-        两路数据去重后统一展示。
+        格式化今日及未来提醒，供 /今日情报 手动指令调用。
+        委托给 _format_reminders_serial，行为与定时推送完全一致。
         """
         json_reminders, sys_tasks = await asyncio.gather(
             self._load_reminders(),
             self._load_system_tasks(),
         )
+        return await self._format_reminders_serial(json_reminders, sys_tasks)
 
-        # 合并并去重（以 date+content 原文为 key，防止同一条目从两路各出现一次）
-        seen: set[tuple[str, str]] = set()
-        reminders: list[dict] = []
-        for r in json_reminders + sys_tasks:
-            key = (r.get("date", ""), r.get("content", ""))
-            if key not in seen:
-                seen.add(key)
-                reminders.append(r)
-
-        tz = datetime.timezone(datetime.timedelta(hours=self.timezone_offset))
-        now = datetime.datetime.now(tz)
-        today_str = now.strftime("%Y-%m-%d")
-        this_week = {
-            (now + datetime.timedelta(days=i)).strftime("%Y-%m-%d")
-            for i in range(1, self.reminder_lookback_days + 1)
-        }
-
-        today_items: list[dict] = []
-        week_items: list[dict] = []
-
-        for r in reminders:
-            try:
-                d = datetime.datetime.strptime(r["date"], "%Y-%m-%d").strftime("%Y-%m-%d")
-            except (ValueError, KeyError, TypeError):
-                continue
-            if d == today_str:
-                today_items.append(r)
-            elif d in this_week:
-                week_items.append(r)
-
-        if not today_items and not week_items:
-            return "📝 【提醒事项】近期无安排，享受生活吧！"
-
-        # ── 相对日期标签生成（未来提醒用）─────────────────────────────────
-        def _relative_label(item_date_str: str) -> str:
-            """将 YYYY-MM-DD 转为 MM-DD（明天/后天/周几/下周几）格式。"""
-            try:
-                item_date = datetime.date.fromisoformat(item_date_str)
-            except ValueError:
-                return item_date_str[5:]
-            today_date = now.date()
-            delta = (item_date - today_date).days
-            mm_dd = item_date.strftime("%m-%d")
-            weekday_cn = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
-            if delta == 1:
-                rel = "明天"
-            elif delta == 2:
-                rel = "后天"
-            elif delta <= 6:
-                rel = weekday_cn[item_date.weekday()]
-            else:
-                rel = "下" + weekday_cn[item_date.weekday()]
-            return mm_dd + "（" + rel + "）"
-
-        # ── 限速 LLM 格式化（最多 2 路并发，避免触发限流）────────────────────
-        all_items = (
-            [(r, today_str, True) for r in today_items]
-            + [(r, r.get("date", today_str), False) for r in week_items]
-        )
-
-        # Semaphore 限制同时进行的 LLM 调用数量，防止并发过高触发 429
-        _llm_sem = asyncio.Semaphore(2)
-
-        async def _fmt(r: dict, date_for_ctx: str, idx: int) -> str:
-            async with _llm_sem:
-                # 每次调用前稍作错峰，降低短时并发压力
-                if idx > 0:
-                    await asyncio.sleep(0.5 * idx)
-                return await self._parse_reminder_text(
-                    r.get("content", ""),
-                    date_for_ctx,
-                    r.get("run_time", ""),
-                )
-
-        fmt_results = await asyncio.gather(
-            *[_fmt(r, date_ctx, i) for i, (r, date_ctx, _) in enumerate(all_items)],
-            return_exceptions=True,
-        )
-
-        # ── 组装输出 ─────────────────────────────────────────────────────────
-        fmt_today: list[tuple[str, str]] = []   # (run_time, text)
-        fmt_future: list[tuple[str, str]] = []  # (label, text)
-
-        for i, (r, date_ctx, is_today) in enumerate(all_items):
-            result = fmt_results[i]
-            text = result if isinstance(result, str) else r.get("content", "")[:60]
-            run_time = r.get("run_time", "")
-            if is_today:
-                fmt_today.append((run_time, text))
-            else:
-                label = _relative_label(r.get("date", ""))
-                fmt_future.append((label, text))
-
-        parts: list[str] = []
-        if fmt_today:
-            # 有时间的按 HH:MM 排序，无时间的排在末尾
-            fmt_today.sort(key=lambda x: x[0] if x[0] else "99:99")
-            lines_today = []
-            for run_time, text in fmt_today:
-                if run_time:
-                    lines_today.append(run_time + " " + text)
-                else:
-                    lines_today.append(text)
-            parts.append("📝 【今日待办】\n" + "\n".join("🔔 " + t for t in lines_today))
-        if fmt_future:
-            lines_future = [label + ": " + text for label, text in fmt_future]
-            parts.append("📅 【未来提醒】\n" + "\n".join("📌 " + t for t in lines_future))
-
-        return "\n\n".join(parts)
 
     # -----------------------------------------------------------------------
     # 3. 新闻模块
@@ -819,42 +794,65 @@ class InformationAssistantPlugin(Star):
     # -----------------------------------------------------------------------
 
     async def build_news_text(self) -> str:
-        """并发拉取所有数据模块，组装成最终情报文本。"""
+        """
+        组装完整情报文本，保证只输出一条消息。
+
+        执行顺序（解决 LLM 限流问题的关键）：
+        1. HTTP 请求（天气/汇率/余额/新闻）与提醒数据加载并发——互不调用 LLM。
+        2. HTTP 全部返回后 API 压力最低，再串行逐条 LLM 格式化提醒（每条间隔 2 秒）。
+        3. 所有内容就绪后一次性组装，返回单条完整文本。
+        """
         logger.info("[资讯助理] 开始并发拉取情报...")
 
         async def _skip() -> str:
             return ""
 
+        # ── 步骤1：HTTP 请求与提醒加载并发（均不调用 LLM）──────────────────
+        # 注意：HTTP 请求必须在 session 上下文内 await 完毕；
+        # 提醒加载（读本地文件/SQLite）不依赖 session，可以同步并发。
         timeout = aiohttp.ClientTimeout(total=self.request_timeout)
+        reminder_task = asyncio.gather(
+            self._load_reminders(),
+            self._load_system_tasks(),
+        ) if self.enable_reminders else _skip()
+
         async with aiohttp.ClientSession(timeout=timeout) as session:
-            results = await asyncio.gather(
-                self.fetch_weather(session) if self.enable_weather else _skip(),
-                self.fetch_exchange_rates(session) if self.enable_exchange else _skip(),
-                self.fetch_deepseek_balance(session) if self.enable_balance else _skip(),
-                self.fetch_moonshot_balance(session) if self.enable_balance else _skip(),
-                self.fetch_60s_news_text(session) if self.enable_news else _skip(),
-                return_exceptions=True,
+            http_results, reminder_raw = await asyncio.gather(
+                asyncio.gather(
+                    self.fetch_weather(session)          if self.enable_weather  else _skip(),
+                    self.fetch_exchange_rates(session)   if self.enable_exchange else _skip(),
+                    self.fetch_deepseek_balance(session) if self.enable_balance  else _skip(),
+                    self.fetch_moonshot_balance(session) if self.enable_balance  else _skip(),
+                    self.fetch_60s_news_text(session)    if self.enable_news     else _skip(),
+                    return_exceptions=True,
+                ),
+                reminder_task,
+                return_exceptions=False,
             )
 
         def _safe(result, fallback: str) -> str:
             return result if not isinstance(result, Exception) else fallback
 
-        weather_text = _safe(results[0], "🌤️ 【天气】获取超时")
-        exchange_text = _safe(results[1], "📊 【汇率】获取超时")
-        ds_balance = _safe(results[2], "- DeepSeek: 超时")
-        ms_balance = _safe(results[3], "- Kimi: 超时")
-        news_text = _safe(results[4], "📰 【新闻】获取超时")
+        weather_text  = _safe(http_results[0], "🌤️ 【天气】获取超时")
+        exchange_text = _safe(http_results[1], "📊 【汇率】获取超时")
+        ds_balance    = _safe(http_results[2], "- DeepSeek: 超时")
+        ms_balance    = _safe(http_results[3], "- Kimi: 超时")
+        news_text     = _safe(http_results[4], "📰 【新闻】获取超时")
 
-        reminders_text = await self.format_reminders() if self.enable_reminders else ""
+        # ── 步骤2：串行 LLM 格式化提醒（HTTP 已全部返回，API 此时最空闲）──
+        reminders_text = ""
+        if self.enable_reminders and isinstance(reminder_raw, (list, tuple)):
+            json_reminders, sys_tasks = reminder_raw
+            reminders_text = await self._format_reminders_serial(json_reminders, sys_tasks)
 
-        # 按用户配置的 module_order 动态排列各板块
+        # ── 步骤3：按配置顺序一次性组装 ─────────────────────────────────────
         balance_block = f"💰 【API 资产监控】\n{ds_balance}\n{ms_balance}"
         module_map: dict[str, str] = {
-            "weather":   weather_text if self.enable_weather else "",
+            "weather":   weather_text   if self.enable_weather   else "",
             "reminders": reminders_text if self.enable_reminders else "",
-            "exchange":  exchange_text if self.enable_exchange else "",
-            "balance":   balance_block if self.enable_balance else "",
-            "news":      news_text if self.enable_news else "",
+            "exchange":  exchange_text  if self.enable_exchange  else "",
+            "balance":   balance_block  if self.enable_balance   else "",
+            "news":      news_text      if self.enable_news      else "",
         }
         blocks: list[str] = [
             module_map[m] for m in self.module_order
@@ -864,6 +862,131 @@ class InformationAssistantPlugin(Star):
         if not blocks:
             return "📭 资讯助理：所有情报模块已在后台关闭。"
         return _DIVIDER.join(blocks)
+
+    async def _format_reminders_serial(
+        self,
+        json_reminders: list[dict],
+        sys_tasks: list[dict],
+    ) -> str:
+        """
+        合并两路提醒数据，带缓存地格式化每条提醒摘要。
+
+        缓存机制（解决 LLM 限流的根本方案）：
+        - 每条提醒以 SHA1(content+run_time) 为缓存键，持久化存储在 reminder_cache.json
+        - 缓存命中 → 直接使用，零 LLM 调用
+        - 缓存未命中（新提醒）→ 调用 LLM 一次，成功或失败均写入缓存
+        - 结果：第一次遇到新提醒时调用一次 LLM，之后每次推送对该条目零调用
+        - 新旧提醒条目的缓存自然随提醒本身过期而不再被读取（无需主动清理）
+        """
+        await self._load_cache()
+
+        seen: set[tuple[str, str]] = set()
+        reminders: list[dict] = []
+        for r in json_reminders + sys_tasks:
+            key = (r.get("date", ""), r.get("content", ""))
+            if key not in seen:
+                seen.add(key)
+                reminders.append(r)
+
+        tz = datetime.timezone(datetime.timedelta(hours=self.timezone_offset))
+        now = datetime.datetime.now(tz)
+        today_str = now.strftime("%Y-%m-%d")
+        this_week = {
+            (now + datetime.timedelta(days=i)).strftime("%Y-%m-%d")
+            for i in range(1, self.reminder_lookback_days + 1)
+        }
+
+        today_items: list[dict] = []
+        week_items:  list[dict] = []
+        for r in reminders:
+            try:
+                d = datetime.datetime.strptime(r["date"], "%Y-%m-%d").strftime("%Y-%m-%d")
+            except (ValueError, KeyError, TypeError):
+                continue
+            if d == today_str:
+                today_items.append(r)
+            elif d in this_week:
+                week_items.append(r)
+
+        if not today_items and not week_items:
+            return "📝 【提醒事项】近期无安排，享受生活吧！"
+
+        def _relative_label(item_date_str: str) -> str:
+            try:
+                item_date = datetime.date.fromisoformat(item_date_str)
+            except ValueError:
+                return item_date_str[5:]
+            delta = (item_date - now.date()).days
+            mm_dd = item_date.strftime("%m-%d")
+            wday = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
+            if delta == 1:
+                rel = "明天"
+            elif delta == 2:
+                rel = "后天"
+            elif delta <= 6:
+                rel = wday[item_date.weekday()]
+            else:
+                rel = "下" + wday[item_date.weekday()]
+            return mm_dd + "（" + rel + "）"
+
+        def _strip_trailing_time(text: str) -> str:
+            """删除 LLM 可能在末尾多输出的时间（如 19:00 / 08:00-11:00）。"""
+            import re as _re
+            return _re.sub(
+                r"\s+\d{1,2}:\d{2}(-\d{1,2}:\d{2})?\s*$", "", text
+            ).strip()
+
+        all_items = (
+            [(r, today_str, True) for r in today_items] +
+            [(r, r.get("date", today_str), False) for r in week_items]
+        )
+        fmt_today:  list[tuple[str, str]] = []         # (run_time, text)
+        fmt_future: list[tuple[str, str, str]] = []    # (label, run_time, text)
+        cache_dirty = False
+
+        for idx, (r, date_ctx, is_today) in enumerate(all_items):
+            content_raw = r.get("content", "")
+            run_time    = r.get("run_time", "")
+            cache_k     = self._cache_key(content_raw, run_time)
+
+            if cache_k in self._reminder_cache:
+                # 缓存命中：直接使用，不调用 LLM
+                text = self._reminder_cache[cache_k]
+                logger.debug(f"[资讯助理] 提醒缓存命中：{cache_k}")
+            else:
+                # 缓存未命中：调用 LLM（只有新提醒才会走到这里）
+                if idx > 0:
+                    await asyncio.sleep(2)  # 仅在需要 LLM 时才等待
+                text = await self._parse_reminder_text(content_raw, date_ctx, run_time)
+                self._reminder_cache[cache_k] = text
+                cache_dirty = True
+                logger.debug(f"[资讯助理] 提醒新增缓存：{cache_k}")
+
+            if is_today:
+                fmt_today.append((run_time, text))
+            else:
+                fmt_future.append((_relative_label(r.get("date", "")), run_time, text))
+
+        # 有新缓存条目时异步写盘，不阻塞返回
+        if cache_dirty:
+            asyncio.create_task(self._save_cache())
+
+        parts: list[str] = []
+        if fmt_today:
+            fmt_today.sort(key=lambda x: x[0] if x[0] else "99:99")
+            lines = []
+            for rt, t in fmt_today:
+                t_clean = _strip_trailing_time(t)
+                lines.append((rt + " " + t_clean) if rt else t_clean)
+            parts.append("📝 【今日待办】\n" + "\n".join("🔔 " + t for t in lines))
+        if fmt_future:
+            lines = []
+            for lbl, rt, t in fmt_future:
+                t_clean = _strip_trailing_time(t)
+                time_part = rt + "：" if rt else "："
+                lines.append(lbl + " " + time_part + t_clean)
+            parts.append("📅 【未来提醒】\n" + "\n".join("📌 " + t for t in lines))
+        return "\n\n".join(parts)
 
     # -----------------------------------------------------------------------
     # 定时推送循环（asyncio 原生实现，无需第三方调度器）
@@ -909,7 +1032,7 @@ class InformationAssistantPlugin(Star):
         return (target - now).total_seconds()
 
     async def _broadcast(self) -> None:
-        """向所有目标群组推送今日情报。"""
+        """向所有目标群组推送今日情报（单条消息）。"""
         if not self.target_groups:
             logger.warning("[资讯助理] 定时推送已触发，但未配置 target_groups，跳过。")
             return
@@ -937,7 +1060,7 @@ class InformationAssistantPlugin(Star):
     @filter.command("提醒诊断")
     async def diagnose_reminders(self, event: AstrMessageEvent):
         """
-        诊断指令：列出数据库路径、全部表名和列信息、原始任务数据。
+        诊断指令：显示数据库路径、cron_jobs 任务列表及本地提醒状态。
         用法：/提醒诊断
         """
         lines: list[str] = ["🔍 【资讯助理提醒诊断 v2】"]
@@ -949,39 +1072,49 @@ class InformationAssistantPlugin(Star):
         else:
             lines.append("\n❌ 未找到数据库，请告知你的部署方式（源码/Docker/桌面版）")
 
-        # 2. 列出数据库所有表名 + future_task 相关表的列信息
+        # 2. 直接查询 cron_jobs 表内容（修复：之前误标无关表，漏显 cron_jobs）
         if db_path:
             def _inspect():
                 result = []
                 try:
                     conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=5)
+                    conn.row_factory = sqlite3.Row
                     cur = conn.cursor()
-                    cur.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
-                    all_tables = [row[0] for row in cur.fetchall()]
-                    result.append(f"\n📂 全部表名（{len(all_tables)} 个）：")
-                    result.append("  " + ", ".join(all_tables))
-                    # 对所有表查列名，找 run_at / note 相关的
-                    for tbl in all_tables:
-                        cur.execute(f"PRAGMA table_info({tbl})")
-                        cols = [row[1] for row in cur.fetchall()]
-                        col_str = ", ".join(cols)
-                        # 标注可能是 future_task 的表
-                        markers = []
-                        if any(c in cols for c in ("run_at", "note", "task_note")):
-                            markers.append("⭐可能是任务表")
-                        if markers:
-                            result.append(f"\n  [{tbl}] {col_str}  <- {', '.join(markers)}")
-                            # 顺带抓前5行原始数据
-                            try:
-                                cur.execute(f"SELECT * FROM {tbl} LIMIT 5")
-                                rows = cur.fetchall()
-                                for r in rows:
-                                    result.append(f"    行：{dict(zip(cols, r))}")
-                            except Exception:
-                                pass
+
+                    cur.execute(
+                        "SELECT name FROM sqlite_master WHERE type='table' AND name='cron_jobs'"
+                    )
+                    if not cur.fetchone():
+                        result.append("\n⚠️ cron_jobs 表不存在，数据库版本可能不同")
+                        conn.close()
+                        return result
+
+                    cur.execute(
+                        "SELECT name, description, next_run_time, payload, status, enabled "
+                        "FROM cron_jobs ORDER BY next_run_time"
+                    )
+                    rows = cur.fetchall()
                     conn.close()
+
+                    result.append(f"\n📋 cron_jobs 表共 {len(rows)} 条任务：")
+                    if not rows:
+                        result.append("  （表为空，换平台前的提醒已不存在）")
+                    for row in rows:
+                        run_at = ""
+                        try:
+                            payload = json.loads(row["payload"] or "{}")
+                            run_at = payload.get("run_at", "") or row["next_run_time"] or ""
+                        except Exception:
+                            run_at = row["next_run_time"] or ""
+                        status_str = f"[{row['status']}|{'启用' if row['enabled'] else '禁用'}]"
+                        name_str = (row["name"] or "")[:30]
+                        desc_str = (row["description"] or "")[:50]
+                        result.append(
+                            f"  {status_str} {str(run_at)[:16]}  {name_str}"
+                            + (f"\n    {desc_str}" if desc_str else "")
+                        )
                 except Exception as exc:
-                    result.append(f"\n❌ 数据库读取失败：{exc}")
+                    result.append(f"\n❌ cron_jobs 查询失败：{exc}")
                 return result
             inspection = await asyncio.to_thread(_inspect)
             lines.extend(inspection)
